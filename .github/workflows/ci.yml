@@ -1,0 +1,165 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: diff check
+        run: git diff --check
+
+  test-linux:
+    name: test-linux / Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.24.x', stable]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Set up SMSC simulator
+        run: |
+          g++ -std=c++11 example/smsc_simulator/smsc.cpp -o smsc
+          ./smsc >smsc.log 2>&1 &
+          for i in {1..50}; do
+            if nc -z 127.0.0.1 2775; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+          cat smsc.log
+          exit 1
+      - name: go test
+        run: go test ./... -count=1 -timeout 900s
+
+  test-linux-race:
+    name: test-linux race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: Set up SMSC simulator
+        run: |
+          g++ -std=c++11 example/smsc_simulator/smsc.cpp -o smsc
+          ./smsc >smsc.log 2>&1 &
+          for i in {1..50}; do
+            if nc -z 127.0.0.1 2775; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+          cat smsc.log
+          exit 1
+      - name: go test -race
+        run: go test ./... -race -count=1 -timeout 900s
+
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: cross vet
+        run: |
+          for target in linux/386 linux/arm linux/s390x linux/mips; do
+            echo "== $target =="
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go vet ./...
+          done
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - uses: dominikh/staticcheck-action@v1.4.1
+        with:
+          version: latest
+          install-go: false
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: latest
+
+  portability:
+    name: portability / ${{ matrix.kind }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: cross-compile
+            os: ubuntu-latest
+            command: |
+              for target in linux/386 linux/arm linux/s390x linux/mips windows/amd64 darwin/amd64; do
+                echo "== $target =="
+                GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go test ./... -run '^$'
+              done
+          - kind: macos-compile
+            os: macos-latest
+            command: go test ./... -run '^$'
+          - kind: windows-compile
+            os: windows-latest
+            command: go test ./... -run '^$'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: go test compile
+        run: ${{ matrix.command }}
+
+  vuln:
+    name: vuln
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

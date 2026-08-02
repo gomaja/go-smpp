@@ -1,0 +1,170 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: diff check
+        run: |
+          zero_sha="0000000000000000000000000000000000000000"
+          base_sha=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "$zero_sha" ]; then
+            base_sha="${{ github.event.before }}"
+          fi
+
+          if [ -n "$base_sha" ] && git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            git diff --check "$base_sha...HEAD"
+          else
+            git diff-tree --check --root --no-commit-id -r HEAD
+          fi
+
+  test-linux:
+    name: test-linux / Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.24.x', stable]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: go test
+        run: go test ./... -count=1 -timeout 900s
+
+  test-linux-race:
+    name: test-linux race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: go test -race
+        run: go test ./... -race -count=1 -timeout 900s
+
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: cross vet
+        run: |
+          for target in linux/386 linux/arm linux/s390x linux/mips; do
+            echo "== $target =="
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go vet ./...
+          done
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - uses: dominikh/staticcheck-action@v1.4.1
+        with:
+          version: v0.7.0
+          install-go: false
+          use-cache: false
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.12.2
+
+  portability:
+    name: portability / ${{ matrix.kind }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: cross-compile
+            os: ubuntu-latest
+            command: |
+              for target in linux/386 linux/arm linux/s390x linux/mips windows/amd64 darwin/amd64; do
+                echo "== $target =="
+                GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go test ./... -run '^$' -exec=/usr/bin/true
+              done
+          - kind: macos-compile
+            os: macos-latest
+            command: go test ./... -run '^$'
+          - kind: windows-compile
+            os: windows-latest
+            command: go test ./... -run '^$'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: go test compile
+        run: ${{ matrix.command }}
+
+  vuln:
+    name: vuln
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...

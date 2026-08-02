@@ -1,0 +1,8 @@
+go-smpp
+
+This project is licensed under the Apache License, Version 2.0. The full
+license text is included in LICENSE.
+
+Portions of the GSM 7-bit encoding and SMPP TLV code are derived from
+fiorix/go-smpp, licensed under the MIT License. The license notice is included
+in LICENSES/fiorix-go-smpp-MIT.txt.

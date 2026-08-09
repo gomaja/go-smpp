@@ -16,6 +16,12 @@ updates:
       go-modules:
         patterns:
           - '*'
+        exclude-patterns:
+          - golang.org/x/text
+    ignore:
+      - dependency-name: golang.org/x/text
+        versions:
+          - '>=0.35.0'
 
   - package-ecosystem: github-actions
     directory: /

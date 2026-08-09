@@ -16,6 +16,8 @@ updates:
       go-modules:
         patterns:
           - '*'
+        exclude-patterns:
+          - golang.org/x/text
     ignore:
       - dependency-name: golang.org/x/text
         versions:

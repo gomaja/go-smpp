@@ -1,6 +1,8 @@
 package pdu
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
@@ -74,4 +76,28 @@ func TestBindRequest(t *testing.T) {
 			data.BIND_TRANSCEIVER,
 		)
 	})
+}
+
+func TestBindingTypeString(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  BindingType
+		want string
+	}{
+		{name: "receiver", typ: Receiver, want: "receiver"},
+		{name: "transmitter", typ: Transmitter, want: "transmitter"},
+		{name: "transceiver", typ: Transceiver, want: "transceiver"},
+		{name: "unknown", typ: BindingType(99), want: "BindingType(99)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.typ.String())
+
+			var formatted bytes.Buffer
+			_, err := fmt.Fprintf(&formatted, "%s", tt.typ)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, formatted.String())
+		})
+	}
 }

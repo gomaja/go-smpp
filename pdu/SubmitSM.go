@@ -160,5 +160,5 @@ func (c *SubmitSM) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.SUBMIT_SM)
 }

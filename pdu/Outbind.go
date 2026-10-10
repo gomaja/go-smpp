@@ -48,5 +48,5 @@ func (c *Outbind) Unmarshal(b *ByteBuffer) error {
 			c.Password, err = b.ReadCString()
 		}
 		return
-	})
+	}, data.OUTBIND)
 }

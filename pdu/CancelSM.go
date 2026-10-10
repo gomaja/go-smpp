@@ -62,5 +62,5 @@ func (c *CancelSM) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.CANCEL_SM)
 }

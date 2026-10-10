@@ -1,6 +1,7 @@
 package pdu
 
 import (
+	"bytes"
 	stderrors "errors"
 	"fmt"
 	"io"
@@ -97,49 +98,55 @@ func (c *base) GetHeader() Header {
 	return c.Header
 }
 
-func (c *base) unmarshal(b *ByteBuffer, bodyReader func(*ByteBuffer) error) (err error) {
-	fullLen := b.Len()
-
-	if err = c.Header.Unmarshal(b); err == nil {
-
-		// try to unmarshal body
-		// SMPP v5 §3.2.1.3 permits body omission on failure. Also tolerate
-		// successful header-only responses from peers, with empty body fields.
-		headerOnlyResponse := uint32(c.CommandID)&0x80000000 != 0 && c.CommandLength == data.PDU_HEADER_SIZE
-		if bodyReader != nil && !headerOnlyResponse {
-			err = bodyReader(b)
+func (c *base) unmarshal(b *ByteBuffer, bodyReader func(*ByteBuffer) error, commandIDs ...data.CommandIDType) (err error) {
+	if err = c.Header.Unmarshal(b); err != nil {
+		return err
+	}
+	// SMPP v3.4 §§3.2.1, 5.1.1: command_length bounds this PDU,
+	// including when callers supply several frames to public Unmarshal.
+	if c.CommandLength < data.PDU_HEADER_SIZE || c.CommandLength > data.MAX_PDU_LEN {
+		return fmt.Errorf("%w (%d): %w", ErrInvalidCommandLength, c.CommandLength, errors.ErrInvalidPDU)
+	}
+	n := int(c.CommandLength) - data.PDU_HEADER_SIZE
+	if b.Len() < n {
+		return ErrBufferNotEnoughByteToRead
+	}
+	frame := b
+	if b.Len() != n {
+		// Next bounds the body without copying it. Field readers copy any
+		// values they retain; Parse already supplies exactly one frame.
+		frame = &ByteBuffer{Buffer: bytes.NewBuffer(b.Next(n))}
+	}
+	// SMPP v3.4 §5.1.2, Table 5-1: the complete command_id identifies
+	// the PDU type, including when a caller invokes Unmarshal directly.
+	if len(commandIDs) > 0 {
+		matched := false
+		for _, id := range commandIDs {
+			if c.CommandID == id {
+				matched = true
+				break
+			}
 		}
-
-		if err == nil {
-			// command length
-			cmdLength := int(c.CommandLength)
-
-			// got - total read byte(s)
-			got := fullLen - b.Len()
-			if got > cmdLength {
-				err = errors.ErrInvalidPDU
-				return
-			}
-
-			// body < command_length, still have optional parameters ?
-			if got < cmdLength {
-				var optParam []byte
-				if optParam, err = b.ReadN(cmdLength - got); err == nil {
-					err = c.unmarshalOptionalParam(optParam)
-				}
-				if err != nil {
-					return
-				}
-			}
-
-			// validate again
-			if b.Len() != fullLen-cmdLength {
-				err = errors.ErrInvalidPDU
-			}
+		if !matched {
+			frame.Next(frame.Len())
+			return &DecodeError{Header: c.Header, Status: data.ESME_RINVCMDID, Err: errors.ErrUnknownCommandID}
 		}
 	}
-
-	return
+	// Optional fields belong only to the current frame (§3.2.4.1).
+	c.OptionalParameters = make([]Field, 0)
+	// SMPP v5 §3.2.1.3 permits body omission on failure. Also tolerate
+	// successful header-only responses from peers, with empty body fields.
+	headerOnlyResponse := uint32(c.CommandID)&0x80000000 != 0 && frame.Len() == 0
+	if bodyReader != nil && !headerOnlyResponse {
+		if err = bodyReader(frame); err != nil {
+			frame.Next(frame.Len())
+			return err
+		}
+	}
+	if frame.Len() > 0 {
+		return c.unmarshalOptionalParam(frame.Next(frame.Len()))
+	}
+	return nil
 }
 
 func (c *base) unmarshalOptionalParam(optParam []byte) (err error) {

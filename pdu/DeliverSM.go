@@ -102,5 +102,5 @@ func (c *DeliverSM) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.DELIVER_SM)
 }

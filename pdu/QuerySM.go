@@ -52,5 +52,5 @@ func (c *QuerySM) Unmarshal(b *ByteBuffer) error {
 			err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR)
 		}
 		return
-	})
+	}, data.QUERY_SM)
 }

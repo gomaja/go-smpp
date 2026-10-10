@@ -54,10 +54,12 @@ func (c *SubmitMultiResp) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 func (c *SubmitMultiResp) Unmarshal(b *ByteBuffer) error {
+	c.MessageID = ""
+	c.UnsuccessSMEs = UnsuccessSMEs{l: []UnsuccessSME{}}
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.MessageID, err = b.ReadCString(); err == nil {
 			err = c.UnsuccessSMEs.Unmarshal(b)
 		}
 		return
-	})
+	}, data.SUBMIT_MULTI_RESP)
 }

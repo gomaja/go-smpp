@@ -1,0 +1,3 @@
+# Verbatim third-party mapping tables (Unicode License v3): keep their bytes,
+# including the trailing blank line, out of the whitespace check.
+data/testdata/unicode/*.TXT -whitespace

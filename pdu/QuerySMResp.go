@@ -59,6 +59,7 @@ func (c *QuerySMResp) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 func (c *QuerySMResp) Unmarshal(b *ByteBuffer) error {
+	c.MessageID, c.FinalDate, c.MessageState, c.ErrorCode = "", "", 0, 0
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.MessageID, err = b.ReadCString(); err == nil {
 			if c.FinalDate, err = b.ReadCString(); err == nil {
@@ -68,5 +69,5 @@ func (c *QuerySMResp) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.QUERY_SM_RESP)
 }

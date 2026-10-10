@@ -94,6 +94,7 @@ func (c *BindResp) Marshal(b *ByteBuffer) {
 // matching how SubmitSMResp handles its message_id. A final unterminated
 // system_id is also retained up to the frame boundary for interoperability.
 func (c *BindResp) Unmarshal(b *ByteBuffer) error {
+	c.SystemID = ""
 	return c.base.unmarshal(b, func(w *ByteBuffer) (err error) {
 		c.SystemID, err = w.ReadCString()
 		if errors.Is(err, io.EOF) {
@@ -109,7 +110,7 @@ func (c *BindResp) Unmarshal(b *ByteBuffer) error {
 			_, _ = w.ReadN(w.Len())
 		}
 		return nil
-	})
+	}, data.BIND_RECEIVER_RESP, data.BIND_TRANSMITTER_RESP, data.BIND_TRANSCEIVER_RESP)
 }
 
 func (c *BindResp) isZeroPaddedFailedBindBody(w *ByteBuffer) bool {

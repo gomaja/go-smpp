@@ -11,6 +11,13 @@ import (
 )
 
 func FuzzParse(f *testing.F) {
+	for _, fixture := range specificationBodies() {
+		f.Add(decodeTestFrame(data.CommandIDType(fixture.id), []byte(fixture.body)))
+	}
+	for _, id := range []data.CommandIDType{data.DATA_SM_RESP, data.DELIVER_SM_RESP} {
+		f.Add(decodeTestFrame(id, []byte("unterminated")))
+		f.Add(decodeTestFrame(id, bytes.Repeat([]byte{'I'}, data.MAX_PDU_LEN-16)))
+	}
 	for _, seed := range []string{
 		"",
 		"0000000f800000060000000000000001",
@@ -295,11 +302,15 @@ func FuzzUDHParse(f *testing.F) {
 
 func trailingResponseString(p PDU) bool {
 	switch p.(type) {
-	case *BindResp, *SubmitSMResp:
+	case *BindResp, *SubmitSMResp, *DataSMResp, *DeliverSMResp:
 		return true
 	}
 	return false
 }
 func normalizedErrorResponse(p PDU) bool {
-	return trailingResponseString(p) && p.GetHeader().CommandStatus != data.ESME_ROK && len(p.GetOptionalParameters()) == 0
+	switch p.(type) {
+	case *BindResp, *SubmitSMResp:
+		return p.GetHeader().CommandStatus != data.ESME_ROK && len(p.GetOptionalParameters()) == 0
+	}
+	return false
 }

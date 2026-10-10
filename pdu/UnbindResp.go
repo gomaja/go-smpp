@@ -44,5 +44,5 @@ func (c *UnbindResp) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 func (c *UnbindResp) Unmarshal(b *ByteBuffer) error {
-	return c.base.unmarshal(b, nil)
+	return c.base.unmarshal(b, nil, data.UNBIND_RESP)
 }

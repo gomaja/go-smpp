@@ -36,8 +36,8 @@ const (
 	SM_RESPONSE_TNACK = 1
 	SM_RESPONSE_PNACK = 2
 
-	// Interface_Version
-	SMPP_V33 int8 = int8(-0x33)
+	// Interface_Version: SMPP v3.4 §5.2.4, versions through v3.3 use 0x00–0x33.
+	SMPP_V33 int8 = 0x33
 	SMPP_V34      = byte(0x34)
 
 	// Address_TON
@@ -116,7 +116,8 @@ const (
 	// Following are the 2 byte tag and min/max lengths for
 	// supported optional parameter (declann)
 
-	OPT_PAR_MSG_WAIT = 2
+	// SMPP v3.4 §5.3, Table 5-7; ms_msg_wait_facilities (§5.3.2.13).
+	OPT_PAR_MSG_WAIT = 0x0030
 
 	// Privacy Indicator
 	OPT_PAR_PRIV_IND = 0x0201
@@ -236,7 +237,8 @@ const (
 	SM_SME_ACK_DELIVERY_REQUESTED = byte(0x04)
 	SM_SME_ACK_MANUAL_REQUESTED   = byte(0x08)
 	SM_SME_ACK_BOTH_REQUESTED     = byte(0x0c)
-	//   Intermediate notification (bit 5)
+	//   Intermediate notification: bit 4 per §5.2.17's xxx1xxxx wire pattern,
+	//   confirmed by SMPP v5 §4.7.21 Table 4-52; v3.4's "bit 5" label is inconsistent.
 	SM_NOTIF_MASK          = byte(0x010)
 	SM_NOTIF_NOT_REQUESTED = byte(0x000)
 	SM_NOTIF_REQUESTED     = byte(0x010)
@@ -294,9 +296,9 @@ const (
 	// Source Telematics ID
 	OPT_PAR_SRC_TELE_ID = 0x0010
 
-	// QOS Time to Live
+	// QOS Time to Live: SMPP v3.4 §5.3.2.9 specifies a four-octet Integer.
 	OPT_PAR_QOS_TIME_TO_LIVE     = 0x0017
-	OPT_PAR_QOS_TIME_TO_LIVE_MIN = 1
+	OPT_PAR_QOS_TIME_TO_LIVE_MIN = 4
 	OPT_PAR_QOS_TIME_TO_LIVE_MAX = 4
 
 	// Payload Type

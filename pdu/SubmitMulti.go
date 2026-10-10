@@ -102,5 +102,5 @@ func (c *SubmitMulti) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.SUBMIT_MULTI)
 }

@@ -40,5 +40,5 @@ func (c *EnquireLink) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 func (c *EnquireLink) Unmarshal(b *ByteBuffer) error {
-	return c.base.unmarshal(b, nil)
+	return c.base.unmarshal(b, nil, data.ENQUIRE_LINK)
 }

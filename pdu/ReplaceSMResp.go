@@ -44,5 +44,5 @@ func (c *ReplaceSMResp) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 func (c *ReplaceSMResp) Unmarshal(b *ByteBuffer) error {
-	return c.base.unmarshal(b, nil)
+	return c.base.unmarshal(b, nil, data.REPLACE_SM_RESP)
 }

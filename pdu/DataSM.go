@@ -71,5 +71,5 @@ func (c *DataSM) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.DATA_SM)
 }

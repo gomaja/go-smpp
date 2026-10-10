@@ -61,11 +61,12 @@ func (c *SubmitSMResp) Marshal(b *ByteBuffer) {
 // Unmarshal implements PDU interface. Missing bodies and final unterminated
 // message_id strings are tolerated to avoid retrying accepted submissions.
 func (c *SubmitSMResp) Unmarshal(b *ByteBuffer) error {
+	c.MessageID = ""
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		c.MessageID, err = b.ReadCString()
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return
-	})
+	}, data.SUBMIT_SM_RESP)
 }

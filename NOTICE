@@ -6,3 +6,7 @@ license text is included in LICENSE.
 Portions of the GSM 7-bit encoding and SMPP TLV code are derived from
 fiorix/go-smpp, licensed under the MIT License. The license notice is included
 in LICENSES/fiorix-go-smpp-MIT.txt.
+
+The Unicode mapping files data/testdata/unicode/8859-1.TXT, 8859-5.TXT and
+8859-8.TXT are copyright © 2015 Unicode, Inc. and are used under the Unicode
+License v3, included in LICENSES/Unicode-3.0.txt.

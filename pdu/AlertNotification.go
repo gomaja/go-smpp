@@ -48,5 +48,5 @@ func (a *AlertNotification) Unmarshal(b *ByteBuffer) error {
 			err = a.EsmeAddr.unmarshal(b, data.ESME_RINVDSTADR)
 		}
 		return
-	})
+	}, data.ALERT_NOTIFICATION)
 }

@@ -1,6 +1,9 @@
 package pdu
 
 import (
+	"errors"
+	"io"
+
 	"github.com/gomaja/go-smpp/data"
 )
 
@@ -52,8 +55,14 @@ func (c *DeliverSMResp) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 func (c *DeliverSMResp) Unmarshal(b *ByteBuffer) error {
+	c.MessageID = ""
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		c.MessageID, err = b.ReadCString()
+		// Match the final message_id tolerance used by other submission
+		// responses (SMPP v3.4 §4.6.2; v5 §4.3.1.2).
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
 		return
-	})
+	}, data.DELIVER_SM_RESP)
 }

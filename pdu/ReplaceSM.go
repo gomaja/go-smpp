@@ -74,5 +74,5 @@ func (c *ReplaceSM) Unmarshal(b *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.REPLACE_SM)
 }

@@ -174,7 +174,9 @@ No independent TLS protocol implementation or TLS conformance claim is made.
 v3.4 Tables 4-1–4-30 and §§5.2.21–24. It joins `*pdu.ValidationError` values,
 with a field name, suggested command_status (§5.1.3), and an underlying cause.
 It examines supplied fields even if an error response omits its body.
-Transports do not call it automatically.
+Transports do not call it automatically. The public constants advertise v3.3
+as `0x33`, `ms_msg_wait_facilities` as tag `0x0030`, and the QoS time-to-live
+value as exactly four octets (§5.2.4, Table 5-7, §5.3.2.9).
 
 Validate suggests these statuses for C-Octet length violations (SMPP v3.4
 §5.1.3, Table 5-2):
@@ -206,10 +208,20 @@ a transit SMSC forward accepted traffic.
 Every response accepts an omitted body, with empty fields, on success or
 failure. Body omission on failure follows SMPP v5 §3.2.1.3; successful omission
 is an interop tolerance, especially for the unused deliver_sm_resp message_id
-(v3.4 §4.6.2). Full bodies remain readable. BindResp/SubmitSMResp also accept
-a final unterminated system_id/message_id up to the frame end. After a NUL,
+(v3.4 §4.6.2). Full bodies remain readable. BindResp, SubmitSMResp, DataSMResp
+and DeliverSMResp also accept a final unterminated system_id/message_id up to
+the frame end. This is an interoperability tolerance; the specification still
+requires NUL. After a NUL,
 remaining bytes must form valid TLVs. Nonzero-status bind/submit responses
 without TLVs normalize to a header-only response on marshal.
+
+Public `Unmarshal` bounds mandatory fields and TLVs by `command_length`, even
+when its buffer contains subsequent frames (§§3.2.1, 5.1.1). It rejects a
+`command_id` belonging to a different concrete PDU type with `DecodeError`
+and `ESME_RINVCMDID` (§5.1.2, Table 5-1). BindRequest and BindResp each accept
+all three bind variants; decoding a BindRequest derives its BindingType from
+the incoming command. Reusing a PDU replaces optional parameters and clears
+omitted response-body fields.
 
 ### Receive and send length policy
 
@@ -222,7 +234,7 @@ accepted traffic. Strict specification maxima are available through Validate.
 | C-Octet strings, including credentials | Any NUL-terminated frame-bounded octets | Any length within MAX_PDU_LEN; embedded NUL rejected | Address setter: 64 content octets; list-name setter: 20. Validate: per-PDU v3.4 maxima | Preserve long credentials and forwarded peer fields |
 | sm_length / number_of_dests | 0–255 with all bytes/entries present | At most 255 | Message setters / destination Add: 254; Validate: 254 | One-octet wire fields permit 255 |
 | Segment count / TLV value length | Structurally bounded | At most 255 segments / 65535 TLV octets | Existing guards retained | Wire representation limits |
-| Response body | Missing body tolerated; bind/submit trailing unterminated string tolerated | Normal body emission, or header-only error normalization | Validate examines supplied fields | Avoid dropped binds and duplicate submission retries |
+| Response body | Missing body tolerated; bind/submit/data/deliver trailing unterminated string tolerated | Normal body emission, or header-only error normalization | Validate examines supplied fields | Avoid dropped binds and duplicate submission retries |
 | Message, TLV, UDH and mandatory-body framing | Structural errors return DecodeError | Framing and MAX_PDU_LEN enforced | Structural guards retained | Keep field boundaries intact |
 
 C-Octet strings preserve non-ASCII octets on receive and send despite v3.4
@@ -262,15 +274,34 @@ Packed splitting moves boundaries to avoid ambiguous tails in generated parts.
 UDH fill bits have no receiver meaning (TS 23.040 §9.2.3.24) and are ignored.
 An escaped final septet is retained rather than interpreted as padding.
 
-Data-coding groups select their alphabet under TS 23.038 §4. GSM-alphabet
+The GSM default alphabet and extension table follow ETSI TS 23.038 V19.0.0
+§§6.2.1–6.2.1.1; §6.2.1.1 is unchanged in 3GPP V20.0.0 (2026-06), apart from
+editorial reference and note labels. The newer source is
+https://www.3gpp.org/ftp/Specs/archive/23_series/23.038/23038-k00.zip.
+
+Data-coding groups select their alphabet under ETSI TS 23.038 V19.0.0 §4,
+unchanged in 3GPP V20.0.0 (2026-06). GSM-alphabet
 custom encodings use escape-safe 160/153 septet budgets. UCS2 uses encoded
-UTF-16 octets. Compressed data-coding groups require TS 23.042 support and are
-retained as raw binary rather than encoded as uncompressed text. SMPP data_coding
+UTF-16 octets. Compressed data-coding groups with a defined alphabet require
+TS 23.042 support and are retained as raw binary rather than encoded as
+uncompressed text. Reserved alphabet selections use the GSM default fallback
+from TS 23.038 §4, including when the compression bit is set. SMPP data_coding
 05/09/0A/0D/0E are distinct opaque text alphabets (§5.2.19), with 140-octet
 budgets; without a character-aware codec they remain unsplit if they fit and
 otherwise return an error. A caller-supplied custom codec without a splitter
 constructs at most 254 octets including UDH (SMPP v3.4 §§5.2.21–22);
 longer text returns an error. Parsed 255-octet fields still re-marshal unchanged.
+
+Latin-1, Cyrillic and Hebrew mappings follow the Unicode Consortium's official
+`ISO8859/8859-1.TXT`, `8859-5.TXT` and `8859-8.TXT` tables, with an upstream
+limitation in the Cyrillic and Hebrew codecs: x/text decodes C1 controls at
+`0x80`–`0x9F` as U+FFFD and refuses to encode U+0080–U+009F.
+Related discussion that requests the inverse change
+(replacing Latin-1 C1 controls) is at https://github.com/golang/go/issues/23706;
+it does not track preserving Cyrillic/Hebrew controls. No local workaround is
+applied. Latin-1 preserves its C1 controls, with a dedicated test to signal
+when upstream changes that behavior. Undefined Hebrew octets retain
+x/text's replacement-character decode behavior.
 
 Optional-parameter lookups use the first occurrence consistently; all
 occurrences remain accessible in wire order. UDH concatenation information

@@ -199,7 +199,8 @@ func (c *gsm7bitPacked) ShouldSplit(text string, octetLimit uint) (shouldSplit b
 	tLen := len(runeSlice)
 	escCharsLen := len(GetEscapeChars(runeSlice))
 	regCharsLen := tLen - escCharsLen
-	// Escape characters occupy two septets; see 3GPP TS 23.038 section 6.2.1.1.
+	// Escape characters occupy two septets; ETSI TS 23.038 V19.0.0
+	// §6.2.1.1, unchanged in 3GPP V20.0.0 (2026-06).
 	return uint(packedGSM7Octets(regCharsLen+escCharsLen*2, 0, strings.HasSuffix(text, "\r"))) > octetLimit
 }
 
@@ -652,10 +653,17 @@ func FromDataCoding(code byte) (enc Encoding) {
 		return &opaque8bit{coding: code}
 	}
 	underlying := GSM7BIT
-	// TS 23.038 §4 defines GSM SMS DCS groups beyond SMPP's direct codes.
+	// ETSI TS 23.038 V19.0.0 §4, unchanged in 3GPP V20.0.0 (2026-06),
+	// defines GSM SMS DCS groups beyond SMPP's direct codes.
 	// Reserved values retain the GSM default alphabet fallback.
 	switch {
 	case code >= 0x10 && code <= 0x7f:
+		if code&0x0c == 0x0c {
+			// TS 23.038 V19.0.0 §4, unchanged in 3GPP V20.0.0 (2026-06):
+			// a reserved alphabet selects the
+			// receiver's GSM default fallback, including when bit 5 is set.
+			break
+		}
 		if code&0x20 != 0 {
 			// TS 23.038 §4 selects TS 23.042 compression. This package does not
 			// implement that codec, so preserve raw binary rather than emit text

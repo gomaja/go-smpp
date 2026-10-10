@@ -95,6 +95,16 @@ func (b *BindRequest) Marshal(w *ByteBuffer) {
 // Unmarshal implements PDU interface.
 func (b *BindRequest) Unmarshal(w *ByteBuffer) error {
 	return b.base.unmarshal(w, func(w *ByteBuffer) (err error) {
+		// SMPP v3.4 §5.1.2 Table 5-1: a reused bind object follows
+		// the incoming command, so GetResponse selects its matching ID.
+		switch b.CommandID {
+		case data.BIND_RECEIVER:
+			b.BindingType = Receiver
+		case data.BIND_TRANSMITTER:
+			b.BindingType = Transmitter
+		case data.BIND_TRANSCEIVER:
+			b.BindingType = Transceiver
+		}
 		if b.SystemID, err = w.ReadCString(); err == nil {
 			if b.Password, err = w.ReadCString(); err == nil {
 				if b.SystemType, err = w.ReadCString(); err == nil {
@@ -105,5 +115,5 @@ func (b *BindRequest) Unmarshal(w *ByteBuffer) error {
 			}
 		}
 		return
-	})
+	}, data.BIND_RECEIVER, data.BIND_TRANSMITTER, data.BIND_TRANSCEIVER)
 }

@@ -2,6 +2,7 @@ package data
 
 import (
 	"encoding/hex"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -40,28 +41,15 @@ func testEncodingSplit(t *testing.T, enc EncDec, octetLim uint, original string,
 		require.LessOrEqualf(t, uint(len(seg)), octetLim,
 			"Segment len must be less than or equal to %d, got %d", octetLim, len(seg))
 
+		var decoded string
 		if enc == GSM7BITPACKED {
-			seg = shiftBitsOneRight(seg)
+			decoded, err = DecodeGSM7Packed(seg, 1, -1)
+		} else {
+			decoded, err = enc.Decode(seg)
 		}
-		decoded, err := enc.Decode(seg)
 		require.Nil(t, err)
 		require.Equal(t, expectDecode[i], decoded)
 	}
-}
-
-func shiftBitsOneRight(input []byte) []byte {
-	carry := byte(0)
-	for i := len(input) - 1; i >= 0; i-- {
-		// Save the carry bit from the previous byte
-		nextCarry := input[i] & 0b00000001
-		// Shift the current byte to the right
-		input[i] >>= 1
-		// Apply the carry from the previous byte to the current byte
-		input[i] |= carry << 7
-		// Update the carry for the next byte
-		carry = nextCarry
-	}
-	return input
 }
 
 func TestCoding(t *testing.T) {
@@ -78,7 +66,7 @@ func TestCoding(t *testing.T) {
 
 func TestGSM7Bit(t *testing.T) {
 	require.EqualValues(t, 0, GSM7BITPACKED.DataCoding())
-	testEncoding(t, GSM7BITPACKED, "gjwklgjkwP123+?", "67f57dcd3eabd777684c365bfd00")
+	testEncoding(t, GSM7BITPACKED, "gjwklgjkwP123+?", "67f57dcd3eabd777684c365bfd1a")
 }
 
 func TestShouldSplit(t *testing.T) {
@@ -413,7 +401,7 @@ func TestSplit_GSM7BITPACKED(t *testing.T) {
 				"3665381c0e87c3e1",
 			},
 			[]string{
-				"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\r",
+				"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
 				"€ppppppp",
 			})
 	})
@@ -435,7 +423,7 @@ func TestSplit_GSM7BITPACKED(t *testing.T) {
 				"3628381c0e87c3e170",
 			},
 			[]string{
-				"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp{\r",
+				"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp{",
 				"{pppppppp",
 			})
 	})
@@ -457,7 +445,7 @@ func TestSplit_GSM7BITPACKED(t *testing.T) {
 				"3665381c0e87c3e170",
 			},
 			[]string{
-				"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp€\r",
+				"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp€",
 				"€pppppppp",
 			})
 	})
@@ -501,7 +489,7 @@ func TestSplit_GSM7BITPACKED(t *testing.T) {
 				"36be0d6ad3db003729",
 			},
 			[]string{
-				"|{[€|^€[{|€{[|^{~[}€|}|^|^[^]€{[]~}€]{{^|^][€]|€~€^[~}^]{]~{^^€^[~|^]|€~|^€{\r",
+				"|{[€|^€[{|€{[|^{~[}€|}|^|^[^]€{[]~}€]{{^|^][€]|€~€^[~}^]{]~{^^€^[~|^]|€~|^€{",
 				"]{~|}",
 			})
 	})
@@ -645,4 +633,211 @@ func TestGSM7BitEscapeCharSeptets(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, text, decoded)
 	})
+}
+
+// UTF-16 requires two code units for supplementary characters. Segment limits
+// are octets under 3GPP TS 23.040 section 9.2.3.24.
+func TestUCS2SplitEncodedOctetBoundaries(t *testing.T) {
+	splitter := UCS2.(Splitter)
+	for _, tc := range []struct {
+		name, text string
+		limit      uint
+		count      int
+	}{
+		{"70_units", strings.Repeat("a", 70), 140, 1},
+		{"71_units", strings.Repeat("a", 71), 140, 2},
+		{"67_units_with_header", strings.Repeat("a", 67), 134, 1},
+		{"68_units_with_header", strings.Repeat("a", 68), 134, 2},
+		{"supplementary", strings.Repeat("😀", 40), 140, 2},
+		{"surrogate_at_boundary", strings.Repeat("a", 66) + "😀b", 134, 2},
+		{"many_surrogates", strings.Repeat("😀", 71), 134, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.count > 1, splitter.ShouldSplit(tc.text, tc.limit))
+			parts, err := splitter.EncodeSplit(tc.text, tc.limit)
+			require.NoError(t, err)
+			require.Len(t, parts, tc.count)
+			var joined strings.Builder
+			for _, part := range parts {
+				require.LessOrEqual(t, len(part), int(tc.limit))
+				decoded, err := UCS2.Decode(part)
+				require.NoError(t, err)
+				joined.WriteString(decoded)
+			}
+			require.Equal(t, tc.text, joined.String())
+		})
+	}
+}
+
+func TestASCIIRejectsUnrepresentableText(t *testing.T) {
+	for _, text := range []string{"é", "😀", string([]byte{0xff})} {
+		encoded, err := ASCII.Encode(text)
+		require.Error(t, err, "accepted %q as %x", text, encoded)
+		_, err = ASCII.(Splitter).EncodeSplit(text, 134)
+		require.Error(t, err)
+	}
+	encoded, err := ASCII.Encode(string([]byte{0, 127}))
+	require.NoError(t, err)
+	require.Equal(t, []byte{0, 127}, encoded)
+	decoded, err := ASCII.Decode(encoded)
+	require.NoError(t, err)
+	require.Equal(t, string(encoded), decoded)
+}
+
+func TestGSM7SeptetSplitBoundaries(t *testing.T) {
+	splitter := GSM7BIT.(Splitter)
+	for _, limit := range []uint{160, 153} {
+		require.False(t, splitter.ShouldSplit(strings.Repeat("a", int(limit)), limit))
+		require.True(t, splitter.ShouldSplit(strings.Repeat("a", int(limit)+1), limit))
+		text := strings.Repeat("a", int(limit)-1) + "€b"
+		parts, err := splitter.EncodeSplit(text, limit)
+		require.NoError(t, err)
+		require.Len(t, parts, 2)
+		require.Len(t, parts[0], int(limit)-1)
+		require.Equal(t, []byte{0x1b, 0x65, 'b'}, parts[1])
+	}
+	packed := GSM7BITPACKED.(Splitter)
+	require.False(t, packed.ShouldSplit(strings.Repeat("a", 160), 140))
+	require.True(t, packed.ShouldSplit(strings.Repeat("a", 161), 140))
+	for _, text := range []string{strings.Repeat("a", 153), strings.Repeat("a", 152) + "€"} {
+		parts, err := packed.EncodeSplit(text, 134)
+		require.NoError(t, err)
+		for _, part := range parts {
+			require.LessOrEqual(t, len(part), 134)
+		}
+	}
+}
+
+func TestSplitHonorsSmallBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		enc   Encoding
+		text  string
+		limit uint
+		sizes []int
+	}{
+		{GSM7BIT, "AB", 1, []int{1, 1}},
+		{GSM7BITPACKED, "ABC", 2, []int{2, 1}},
+		{GSM7BITPACKED, "ABCDEFGH", 7, []int{7, 1}},
+		{GSM7BITPACKED, "ABCDEFGHà", 8, []int{8}},
+		{UCS2, "AB", 2, []int{2, 2}},
+	} {
+		segments, err := tc.enc.(Splitter).EncodeSplit(tc.text, tc.limit)
+		require.NoError(t, err)
+		require.Len(t, segments, len(tc.sizes))
+		if tc.enc == GSM7BITPACKED && tc.limit == 8 {
+			decoded, err := DecodeGSM7Packed(segments[0], 1, 9)
+			require.NoError(t, err)
+			require.Equal(t, tc.text, decoded)
+		}
+		for i, size := range tc.sizes {
+			require.Len(t, segments[i], size)
+		}
+	}
+	for _, tc := range []struct {
+		enc   Encoding
+		text  string
+		limit uint
+	}{
+		{GSM7BIT, "€", 1}, {UCS2, "😀", 2},
+	} {
+		_, err := tc.enc.(Splitter).EncodeSplit(tc.text, tc.limit)
+		require.Error(t, err)
+	}
+}
+
+func TestSplitRejectsZeroBudget(t *testing.T) {
+	for _, enc := range []Encoding{GSM7BIT, GSM7BITPACKED, UCS2, ASCII, LATIN1, CYRILLIC, HEBREW} {
+		_, err := enc.(Splitter).EncodeSplit("A", 0)
+		require.Error(t, err, "coding=%d", enc.DataCoding())
+	}
+}
+
+func TestSplitLargeBudgetDoesNotOverflow(t *testing.T) {
+	for i, enc := range []Encoding{GSM7BIT, GSM7BITPACKED, UCS2, ASCII, LATIN1, CYRILLIC, HEBREW} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			require.NotPanics(t, func() {
+				parts, err := enc.(Splitter).EncodeSplit("AB", ^uint(0))
+				require.NoError(t, err)
+				require.Len(t, parts, 1)
+			})
+		})
+	}
+}
+
+func TestASCIIDecodePreservesArbitraryOctets(t *testing.T) {
+	raw := make([]byte, 256)
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	decoded, err := ASCII.Decode(raw)
+	require.NoError(t, err)
+	require.Equal(t, raw, []byte(decoded))
+	// Received peer-specific alphabets remain readable while caller-selected
+	// ASCII text must still be representable on encode.
+	_, err = ASCII.Encode(decoded)
+	require.Error(t, err)
+}
+
+func TestCustomEncodingBaseEncoding(t *testing.T) {
+	for _, underlying := range []Encoding{GSM7BIT, GSM7BITPACKED, UCS2} {
+		custom := NewCustomEncoding(SMSCDefaultCoding, underlying)
+		base, ok := custom.(interface{ BaseEncoding() EncDec })
+		require.True(t, ok, "custom encoding must expose its selected codec")
+		require.Same(t, underlying, base.BaseEncoding())
+		require.Equal(t, SMSCDefaultCoding, custom.DataCoding())
+	}
+}
+
+func TestCustomEncodingDelegatesSplitter(t *testing.T) {
+	for _, underlying := range []Encoding{GSM7BIT, UCS2} {
+		enc := NewCustomEncoding(0x10, underlying)
+		splitter, ok := enc.(Splitter)
+		require.True(t, ok, "custom encoding must expose its underlying splitter")
+		text := strings.Repeat("é", 160)
+		require.Equal(t, underlying.(Splitter).ShouldSplit(text, 153), splitter.ShouldSplit(text, 153))
+		expected, err := underlying.(Splitter).EncodeSplit(text, 153)
+		require.NoError(t, err)
+		actual, err := splitter.EncodeSplit(text, 153)
+		require.NoError(t, err)
+		require.Equal(t, expected, actual)
+		require.Equal(t, byte(0x10), enc.DataCoding())
+	}
+}
+
+func TestCustomEncodingWithoutSplitterRejectsResegmentation(t *testing.T) {
+	enc := NewCustomEncoding(0x80, &noOpEncDec{})
+	splitter, ok := enc.(Splitter)
+	require.True(t, ok)
+	require.True(t, splitter.ShouldSplit("é", 1))
+	_, err := splitter.EncodeSplit("é", 1)
+	require.ErrorIs(t, err, ErrNotImplSplitterInterface)
+	require.False(t, splitter.ShouldSplit("A", 1))
+}
+
+func TestFromDataCodingGSMAlphabetGroups(t *testing.T) {
+	for _, tc := range []struct {
+		code       byte
+		underlying Encoding
+	}{
+		{0x10, GSM7BIT}, {0x11, GSM7BIT}, {0x40, GSM7BIT}, {0x50, GSM7BIT},
+		{0xc0, GSM7BIT}, {0xd0, GSM7BIT}, {0xf0, GSM7BIT}, {0xf1, GSM7BIT},
+		{0x18, UCS2}, {0x48, UCS2}, {0x58, UCS2}, {0xe0, UCS2}, {0xe8, UCS2},
+		{0x20, BINARY8BIT2}, {0x28, BINARY8BIT2}, {0x60, BINARY8BIT2}, {0x68, BINARY8BIT2},
+		{0x14, BINARY8BIT2}, {0x44, BINARY8BIT2}, {0x54, BINARY8BIT2}, {0xf4, BINARY8BIT2},
+		{0xe4, GSM7BIT}, {0xec, GSM7BIT},
+		{0x1c, GSM7BIT}, {0x4c, GSM7BIT}, {0x80, GSM7BIT}, {0xf8, GSM7BIT},
+	} {
+		t.Run(fmt.Sprintf("%02x", tc.code), func(t *testing.T) {
+			enc := FromDataCoding(tc.code)
+			require.Equal(t, tc.code, enc.DataCoding())
+			expected, expectedErr := tc.underlying.Encode("é€")
+			actual, err := enc.Encode("é€")
+			if expectedErr != nil {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, expected, actual)
+			}
+		})
+	}
 }

@@ -21,17 +21,20 @@ func NewDestinationAddress() (c DestinationAddress) {
 
 // Unmarshal from buffer.
 func (c *DestinationAddress) Unmarshal(b *ByteBuffer) (err error) {
+	defer func() { err = withDecodeStatus(err, data.ESME_RINVDSTADR) }()
 	if c.destFlag, err = b.ReadByte(); err == nil {
 		switch c.destFlag {
 
 		case data.SM_DEST_SME_ADDRESS:
-			err = c.address.Unmarshal(b)
+			err = c.address.unmarshal(b, data.ESME_RINVDSTADR)
 
 		case data.SM_DEST_DL_NAME:
-			err = c.dl.Unmarshal(b)
+			// SMPP v3.4 §5.1.3 distinguishes list names from SME addresses.
+			err = withDecodeStatus(c.dl.Unmarshal(b), data.ESME_RINVDLNAME)
 
 		default:
-			err = fmt.Errorf("unrecognize dest_flag %d", c.destFlag)
+			// SMPP v3.4 §§5.1.3, 5.2.25: invalid destination flag.
+			err = withDecodeStatus(fmt.Errorf("unrecognize dest_flag %d", c.destFlag), data.ESME_RINVDESTFLAG)
 
 		}
 	}
@@ -100,8 +103,13 @@ func NewDestinationAddresses() (u DestinationAddresses) {
 }
 
 // Add to list.
-func (c *DestinationAddresses) Add(addresses ...DestinationAddress) {
+func (c *DestinationAddresses) Add(addresses ...DestinationAddress) error {
+	// SMPP v3.4 §5.2.24 limits number_of_dests to 254.
+	if len(c.l)+len(addresses) > 254 {
+		return fmt.Errorf("destination count exceeds maximum of 254")
+	}
 	c.l = append(c.l, addresses...)
+	return nil
 }
 
 // Get list.
@@ -111,6 +119,8 @@ func (c *DestinationAddresses) Get() []DestinationAddress {
 
 // Unmarshal from buffer.
 func (c *DestinationAddresses) Unmarshal(b *ByteBuffer) (err error) {
+	// SMPP v3.4 §3.3: receive all one-octet counts when entries fit.
+	defer func() { err = withDecodeStatus(err, data.ESME_RINVNUMDESTS) }()
 	var n byte
 	if n, err = b.ReadByte(); err == nil {
 		c.l = make([]DestinationAddress, n)
@@ -126,7 +136,12 @@ func (c *DestinationAddresses) Unmarshal(b *ByteBuffer) (err error) {
 }
 
 // Marshal to buffer.
-func (c *DestinationAddresses) Marshal(b *ByteBuffer) {
+func (c *DestinationAddresses) Marshal(b *ByteBuffer) error {
+	if len(c.l) > 255 {
+		err := fmt.Errorf("destination count exceeds one-octet maximum of 255")
+		b.setError(err)
+		return err
+	}
 	n := byte(len(c.l))
 	_ = b.WriteByte(n)
 
@@ -134,4 +149,5 @@ func (c *DestinationAddresses) Marshal(b *ByteBuffer) {
 	for ; i < n; i++ {
 		c.l[i].Marshal(b)
 	}
+	return nil
 }

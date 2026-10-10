@@ -9,6 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSubmitSMShouldSplitEncodedBudget(t *testing.T) {
+	s := NewSubmitSM().(*SubmitSM)
+	require.NoError(t, s.Message.SetMessageWithEncoding(strings.Repeat("A", 160), data.GSM7BIT))
+	require.False(t, s.ShouldSplit(), "160 unpacked septets fit")
+	require.NoError(t, s.Message.SetMessageDataWithEncoding(make([]byte, 135), data.BINARY8BIT2))
+	require.NoError(t, s.Message.SetUDH(UDH{NewIEConcatMessage(2, 1, 1)}))
+	require.True(t, s.ShouldSplit(), "135 binary octets plus six-byte UDH need splitting")
+}
+
 func TestSubmitSM(t *testing.T) {
 	v := NewSubmitSM().(*SubmitSM)
 	require.True(t, v.CanResponse())
@@ -62,10 +71,10 @@ func TestSubmitSMSplitAssignsIndependentHeaders(t *testing.T) {
 		require.False(t, exists, "duplicate sequence number %d", part.GetSequenceNumber())
 		seen[part.GetSequenceNumber()] = struct{}{}
 
-		require.Equal(t, v.OptionalParameters[TagUserMessageReference], part.OptionalParameters[TagUserMessageReference])
+		require.Equal(t, v.OptionalParameters[0], part.OptionalParameters[0])
 	}
 
-	parts[0].OptionalParameters[TagUserMessageReference].Data[0] = 0xff
-	require.Equal(t, []byte{0x12, 0x34}, parts[1].OptionalParameters[TagUserMessageReference].Data)
-	require.Equal(t, []byte{0x12, 0x34}, v.OptionalParameters[TagUserMessageReference].Data)
+	parts[0].OptionalParameters[0].Data[0] = 0xff
+	require.Equal(t, []byte{0x12, 0x34}, parts[1].OptionalParameters[0].Data)
+	require.Equal(t, []byte{0x12, 0x34}, v.OptionalParameters[0].Data)
 }

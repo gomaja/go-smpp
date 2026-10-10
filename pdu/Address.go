@@ -2,6 +2,7 @@ package pdu
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gomaja/go-smpp/data"
 )
@@ -39,9 +40,20 @@ func NewAddressWithTonNpiAddr(ton, npi byte, addr string) (a Address, err error)
 
 // Unmarshal from buffer.
 func (c *Address) Unmarshal(b *ByteBuffer) (err error) {
+	return c.unmarshal(b, data.ESME_RINVPARLEN)
+}
+
+func (c *Address) unmarshal(b *ByteBuffer, status data.CommandStatusType) (err error) {
+	// SMPP v3.4 §§2.8, 5.1.3: the containing field determines whether
+	// an invalid address is a source or destination address error.
+	defer func() { err = withDecodeStatus(err, status) }()
 	if c.ton, err = b.ReadByte(); err == nil {
 		if c.npi, err = b.ReadByte(); err == nil {
-			c.address, err = b.ReadCString()
+			var addr string
+			if addr, err = b.ReadCString(); err == nil {
+				// SMPP v3.4 §3.3: receive lengths are limited by the frame.
+				c.address = addr
+			}
 		}
 	}
 	return
@@ -50,7 +62,6 @@ func (c *Address) Unmarshal(b *ByteBuffer) (err error) {
 // Marshal to buffer.
 func (c *Address) Marshal(b *ByteBuffer) {
 	b.Grow(3 + len(c.address))
-
 	_ = b.WriteByte(c.ton)
 	_ = b.WriteByte(c.npi)
 	_ = b.WriteCString(c.address)
@@ -66,10 +77,16 @@ func (c *Address) SetNpi(npi byte) {
 	c.npi = npi
 }
 
-// SetAddress sets address.
+// SetAddress accepts up to 64 content octets, the widest SMPP address field.
+// Address does not know its containing PDU; call pdu.Validate before sending
+// to enforce the per-PDU 21/65-octet limits, including the NUL terminator.
 func (c *Address) SetAddress(addr string) (err error) {
-	if len(addr) > data.SM_ADDR_LEN {
-		err = fmt.Errorf("Address len exceed limit. (%d > %d)", len(addr), data.SM_ADDR_LEN)
+	if strings.IndexByte(addr, 0) >= 0 {
+		return fmt.Errorf("address contains an embedded terminator")
+	}
+	// SMPP v3.4 §3.1.1, Tables 4-20 and 4-30: widest maximum includes NUL.
+	if len(addr)+1 > data.SM_DATA_ADDR_LEN {
+		err = fmt.Errorf("Address len exceed limit. (%d > %d)", len(addr)+1, data.SM_DATA_ADDR_LEN)
 	} else {
 		c.address = addr
 	}

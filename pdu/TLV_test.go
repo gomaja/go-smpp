@@ -1,10 +1,59 @@
 package pdu
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestFieldRejectsOversizedValue(t *testing.T) {
+	f := NewField(TagMessagePayload, make([]byte, 65536))
+	b := NewBuffer(nil)
+	f.Marshal(b)
+	require.Zero(t, b.Len(), "TLV value cannot fit its unsigned 16-bit length")
+}
+
+func TestFieldUnsignedLength(t *testing.T) {
+	for _, n := range []int{32767, 32768, 65535} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			payload := bytes.Repeat([]byte{0xa5}, n)
+			wire := make([]byte, 4+n)
+			binary.BigEndian.PutUint16(wire, uint16(TagMessagePayload))
+			binary.BigEndian.PutUint16(wire[2:], uint16(n))
+			copy(wire[4:], payload)
+			b := NewBuffer(wire)
+			var f Field
+			require.NoError(t, f.Unmarshal(b))
+			require.Len(t, f.Data, n, "unsigned TLV length")
+			require.Equal(t, payload, f.Data)
+			require.Zero(t, b.Len())
+		})
+	}
+}
+
+func TestFieldTruncatedLengthDoesNotConsume(t *testing.T) {
+	for _, wire := range [][]byte{{4}, {4, 36, 0}, {4, 36, 0, 2, 1}, {4, 36, 128, 0}, {4, 36, 255, 255, 1}} {
+		b := NewBuffer(wire)
+		f := NewField(TagUserMessageReference, []byte{7})
+		require.Error(t, f.Unmarshal(b), "truncated TLV %x", wire)
+		require.Equal(t, wire, b.Bytes(), "failed TLV must consume no bytes")
+		require.Equal(t, NewField(TagUserMessageReference, []byte{7}), f)
+	}
+}
+
+func TestFieldZeroLengthOnWire(t *testing.T) {
+	f := NewField(TagAlertOnMessageDelivery, nil)
+	b := NewBuffer(nil)
+	f.Marshal(b)
+	require.Equal(t, []byte{0x13, 0x0c, 0, 0}, b.Bytes())
+	var parsed Field
+	require.NoError(t, parsed.Unmarshal(b))
+	require.Equal(t, TagAlertOnMessageDelivery, parsed.Tag)
+	require.Empty(t, parsed.Data)
+}
 
 func TestFieldConstructors(t *testing.T) {
 	src := []byte{0x01, 0x02}

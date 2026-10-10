@@ -1,12 +1,38 @@
 package pdu
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestSubmitMultiDestinationCountLimit(t *testing.T) {
+	for _, n := range []int{254, 255, 256} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			s := NewSubmitMulti().(*SubmitMulti)
+			d := NewDestinationAddress()
+			a, err := NewAddressWithAddr("123")
+			require.NoError(t, err)
+			d.SetAddress(a)
+			for range n {
+				s.DestAddrs.l = append(s.DestAddrs.l, d)
+			}
+			b := NewBuffer(nil)
+			s.Marshal(b)
+			if n > 255 {
+				require.Zero(t, b.Len(), "invalid destination count must emit no PDU")
+			} else {
+				p, err := Parse(bytes.NewReader(b.Bytes()))
+				require.NoError(t, err)
+				require.Len(t, p.(*SubmitMulti).DestAddrs.Get(), n)
+			}
+		})
+	}
+}
 
 func TestSubmitMulti(t *testing.T) {
 	v := NewSubmitMulti().(*SubmitMulti)
@@ -39,7 +65,7 @@ func TestSubmitMulti(t *testing.T) {
 	d3 := NewDestinationAddress()
 	d3.SetDistributionList(dl)
 
-	v.DestAddrs.Add(d1, d2, d3)
+	_ = v.DestAddrs.Add(d1, d2, d3)
 	require.Equal(t, []DestinationAddress{d1, d2, d3}, v.DestAddrs.Get())
 
 	v.EsmClass = 13
@@ -89,7 +115,7 @@ func TestSubmitMultiwithUDH(t *testing.T) {
 	d3 := NewDestinationAddress()
 	d3.SetDistributionList(dl)
 
-	v.DestAddrs.Add(d1, d2, d3)
+	_ = v.DestAddrs.Add(d1, d2, d3)
 	require.Equal(t, []DestinationAddress{d1, d2, d3}, v.DestAddrs.Get())
 
 	v.EsmClass = 77
@@ -100,11 +126,60 @@ func TestSubmitMultiwithUDH(t *testing.T) {
 	v.Message, err = NewShortMessageWithEncoding("nghắ nghiêng nghiễng ngả", data.UCS2)
 	require.Nil(t, err)
 	v.Message.message = ""
-	v.Message.SetUDH(UDH{NewIEConcatMessage(2, 1, 254)})
+	_ = v.Message.SetUDH(UDH{NewIEConcatMessage(2, 1, 254)})
 
 	validate(t,
 		v,
 		"0000007400000021000000000000000d616263001c1d416c696365720003010000426f623100024c6973743100024c69737432004d633d00005300080036050003fe0201006e006700681eaf0020006e00670068006900ea006e00670020006e0067006800691ec5006e00670020006e00671ea3",
 		data.SUBMIT_MULTI,
 	)
+}
+
+func TestSubmitMultiReceives255Destinations(t *testing.T) {
+	for _, n := range []int{254, 255} {
+		base := NewBuffer(nil)
+		NewSubmitMulti().Marshal(base)
+		body := base.Bytes()[16:]
+		peer := append([]byte(nil), body[:4]...)
+		peer = append(peer, byte(n))
+		for range n {
+			peer = append(peer, 1, 0, 0, '1', 0)
+		}
+		peer = append(peer, body[5:]...)
+		parsed, err := Parse(bytes.NewReader(decodeTestFrame(data.SUBMIT_MULTI, peer)))
+		require.NoError(t, err)
+		dests := parsed.(*SubmitMulti).DestAddrs.Get()
+		require.Len(t, dests, n)
+
+		round := NewBuffer(nil)
+		parsed.Marshal(round)
+
+		require.NoError(t, round.Err())
+		require.Equal(t, decodeTestFrame(data.SUBMIT_MULTI, peer), round.Bytes())
+		for _, d := range dests {
+			require.True(t, d.IsAddress())
+			require.Equal(t, "1", d.Address().Address())
+		}
+	}
+}
+
+func TestSubmitMultiReceivesLongDistributionList(t *testing.T) {
+	base := NewBuffer(nil)
+	NewSubmitMulti().Marshal(base)
+	body := base.Bytes()[16:]
+	peer := append([]byte(nil), body[:4]...)
+	peer = append(peer, 1, 2)
+	peer = append(peer, bytes.Repeat([]byte{'L'}, 512)...)
+	peer = append(peer, 0)
+	peer = append(peer, body[5:]...)
+	parsed, err := Parse(bytes.NewReader(decodeTestFrame(data.SUBMIT_MULTI, peer)))
+	require.NoError(t, err)
+	dests := parsed.(*SubmitMulti).DestAddrs.Get()
+	require.Len(t, dests, 1)
+	require.True(t, dests[0].IsDistributionList())
+	require.Equal(t, string(bytes.Repeat([]byte{'L'}, 512)), dests[0].DistributionList().Name())
+	round := NewBuffer(nil)
+	parsed.Marshal(round)
+	require.NoError(t, round.Err())
+	require.Equal(t, decodeTestFrame(data.SUBMIT_MULTI, peer), round.Bytes())
 }

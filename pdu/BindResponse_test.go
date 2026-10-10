@@ -2,6 +2,7 @@ package pdu
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
@@ -162,6 +163,41 @@ func TestBindResponseRoundTrip(t *testing.T) {
 		resp, ok := p.(*BindResp)
 		require.True(t, ok)
 		require.Equal(t, "system_id_fake", resp.SystemID)
-		require.Equal(t, []byte("bind failed\x00"), resp.OptionalParameters[TagAdditionalStatusInfoText].Data)
+		require.Equal(t, []byte("bind failed\x00"), resp.OptionalParameters[0].Data)
 	})
+}
+
+func TestBindResponseLongSystemID(t *testing.T) {
+	for _, binding := range []BindingType{Receiver, Transmitter, Transceiver} {
+		// A successful response carries the SMSC system_id as given, however
+		// long: peers commonly exceed the v3.4 maximum of 16 octets.
+		p := NewBindResp(*NewBindRequest(binding))
+		p.SystemID = strings.Repeat("I", 128)
+		b := NewBuffer(nil)
+		p.Marshal(b)
+		require.NoError(t, b.Err())
+		require.Equal(t, []byte(p.SystemID+"\x00"), b.Bytes()[16:])
+		parsed, err := Parse(bytes.NewReader(b.Bytes()))
+		require.NoError(t, err)
+		require.Equal(t, p, parsed)
+
+		p.SystemID = "A\x00B"
+		invalid := NewBuffer(nil)
+		p.Marshal(invalid)
+		require.ErrorIs(t, invalid.Err(), ErrEncode)
+		require.Empty(t, invalid.Bytes())
+
+		// A failed response omits the body (v3.4 notes to Tables 4-2/4-4), so
+		// its system_id is neither written nor validated.
+		failed := NewBindResp(*NewBindRequest(binding))
+		failed.CommandStatus = data.ESME_RBINDFAIL
+		failed.SystemID = strings.Repeat("I", 128)
+		header := NewBuffer(nil)
+		failed.Marshal(header)
+		require.NoError(t, header.Err())
+		require.Equal(t, 16, header.Len())
+		parsed, err = Parse(bytes.NewReader(header.Bytes()))
+		require.NoError(t, err)
+		require.Empty(t, parsed.(*BindResp).SystemID)
+	}
 }

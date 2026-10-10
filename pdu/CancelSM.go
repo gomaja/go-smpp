@@ -39,6 +39,7 @@ func (c *CancelSM) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.9.1 Table 4-24: C-Octet maxima include NUL.
 func (c *CancelSM) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.ServiceType) + len(c.MessageID) + 2)
@@ -55,8 +56,8 @@ func (c *CancelSM) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.ServiceType, err = b.ReadCString(); err == nil {
 			if c.MessageID, err = b.ReadCString(); err == nil {
-				if err = c.SourceAddr.Unmarshal(b); err == nil {
-					err = c.DestAddr.Unmarshal(b)
+				if err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
+					err = c.DestAddr.unmarshal(b, data.ESME_RINVDSTADR)
 				}
 			}
 		}

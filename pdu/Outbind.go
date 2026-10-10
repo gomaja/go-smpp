@@ -31,6 +31,7 @@ func (c *Outbind) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §3.3: support longer peer-issued credentials for interoperability.
 func (c *Outbind) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.SystemID) + len(c.Password) + 2)

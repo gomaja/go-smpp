@@ -119,10 +119,13 @@ func (u *UDH) UnmarshalBinary(src []byte) (int, error) {
 	)
 
 	ies := []InfoElement{}
-	for read < udhl { // loop until we still have data to read
+	// TS 23.040 §9.2.3.24: UDHL covers only the header after the
+	// length octet. An IE cannot borrow bytes from the message payload.
+	end := 1 + udhl
+	for read < end {
 		ie := InfoElement{}
 
-		r, err := ie.UnmarshalBinary(src[read:])
+		r, err := ie.UnmarshalBinary(src[read:end])
 		if err != nil {
 			return 0, err
 		}
@@ -148,32 +151,26 @@ func (u UDH) FindInfoElement(id byte) (ie *InfoElement, found bool) {
 	return nil, false
 }
 
-// GetConcatInfo return the FIRST concatenated message IE,
+// GetConcatInfo returns the last concatenation IE (TS 23.040 §9.2.3.24),
 // For 8-bit reference, mref will be a byte value (0-255)
 // For 16-bit reference, mref will be a uint16 value (0-65535)
 func (u UDH) GetConcatInfo() (totalParts, partNum byte, mref uint16, found bool) {
-	if len(u) == 0 {
-		found = false
-		return
+	// TS 23.040 §9.2.3.24: repeated concatenation IEs use the last occurrence.
+	for i := len(u) - 1; i >= 0; i-- {
+		ie := u[i]
+		switch ie.ID {
+		case data.UDH_CONCAT_MSG_8_BIT_REF:
+			if len(ie.Data) != 3 {
+				return
+			}
+			return ie.Data[1], ie.Data[2], uint16(ie.Data[0]), true
+		case data.UDH_CONCAT_MSG_16_BIT_REF:
+			if len(ie.Data) != 4 {
+				return
+			}
+			return ie.Data[2], ie.Data[3], uint16(ie.Data[0])<<8 | uint16(ie.Data[1]), true
+		}
 	}
-
-	// Check for 8-bit reference
-	if ie, ok := u.FindInfoElement(data.UDH_CONCAT_MSG_8_BIT_REF); ok && len(ie.Data) == 3 {
-		mref = uint16(ie.Data[0])
-		totalParts = ie.Data[1]
-		partNum = ie.Data[2]
-		found = ok
-		return
-	}
-
-	// Check for 16-bit reference
-	if ie, ok := u.FindInfoElement(data.UDH_CONCAT_MSG_16_BIT_REF); ok && len(ie.Data) == 4 {
-		mref = uint16(ie.Data[0])<<8 | uint16(ie.Data[1])
-		totalParts = ie.Data[2]
-		partNum = ie.Data[3]
-		found = ok
-	}
-
 	return
 }
 

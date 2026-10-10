@@ -6,6 +6,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestUDHDeclaredBoundary(t *testing.T) {
+	for _, raw := range [][]byte{
+		{}, {5, 0, 3, 1, 2}, {2, 0, 3, 'A', 'B', 'C', 'D'},
+		{6, 0, 3, 1, 2, 1, 0x70, 'A'}, {1, 0},
+	} {
+		u := UDH{NewIEConcatMessage(2, 1, 7)}
+		n, err := u.UnmarshalBinary(raw)
+		require.Error(t, err, "truncated header/IE %x consumed %d", raw, n)
+		require.Zero(t, n)
+		require.Equal(t, UDH{NewIEConcatMessage(2, 1, 7)}, u)
+	}
+	var u UDH
+	n, err := u.UnmarshalBinary([]byte{7, 0, 3, 1, 2, 1, 0x70, 0, 'A'})
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, UDH{{ID: 0, Data: []byte{1, 2, 1}}, {ID: 0x70, Data: []byte{}}}, u)
+}
+
 func TestUserDataHeader(t *testing.T) {
 	t.Run("marshalBinaryUDHConcatMessage", func(t *testing.T) {
 		u := UDH{NewIEConcatMessage(2, 1, 12)}
@@ -94,4 +112,18 @@ func TestUserDataHeader(t *testing.T) {
 		_, err := u.MarshalBinary()
 		require.Error(t, err)
 	})
+}
+
+func TestUDHLastConcatenationIE(t *testing.T) {
+	for _, u := range []UDH{
+		{NewIEConcatMessage(2, 1, 11), NewIEConcatMessage(3, 2, 22)},
+		{NewIEConcatMessage(2, 1, 11), NewIEConcatMessage16Bit(3, 2, 22)},
+		{NewIEConcatMessage16Bit(2, 1, 11), NewIEConcatMessage(3, 2, 22)},
+	} {
+		total, num, ref, ok := u.GetConcatInfo()
+		require.True(t, ok)
+		require.EqualValues(t, 3, total)
+		require.EqualValues(t, 2, num)
+		require.EqualValues(t, 22, ref)
+	}
 }

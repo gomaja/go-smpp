@@ -41,5 +41,7 @@ func TestQuerySMParseOptionalParameter(t *testing.T) {
 
 	query, ok := parsed.(*QuerySM)
 	require.True(t, ok)
-	require.Equal(t, []byte{0x12, 0x34}, query.OptionalParameters[TagUserMessageReference].Data)
+	field, ok := query.GetOptionalParam(TagUserMessageReference)
+	require.True(t, ok)
+	require.Equal(t, []byte{0x12, 0x34}, field.Data)
 }

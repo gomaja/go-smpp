@@ -234,7 +234,7 @@ func (t *transmittable) check(p pdu.PDU, n int, err error) (closing bool) {
 	}
 
 	if n == 0 {
-		if errors.Is(err, ErrWindowsFull) {
+		if errors.Is(err, ErrWindowsFull) || errors.Is(err, pdu.ErrEncode) {
 			closing = false
 		} else if nErr, ok := err.(net.Error); ok {
 			closing = nErr.Timeout()

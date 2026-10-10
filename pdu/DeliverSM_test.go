@@ -64,7 +64,7 @@ func TestDeliverSMwithUDH(t *testing.T) {
 	v.RegisteredDelivery = 83
 	_ = v.Message.SetMessageWithEncoding("nghắ nghiêng nghiễng ngả", data.UCS2)
 	v.Message.message = ""
-	v.Message.SetUDH(UDH{NewIEConcatMessage(2, 1, 254)})
+	_ = v.Message.SetUDH(UDH{NewIEConcatMessage(2, 1, 254)})
 
 	validate(t,
 		v,

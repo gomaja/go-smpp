@@ -1,6 +1,9 @@
 package pdu
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
@@ -8,6 +11,290 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestSplitUsesCurrentEncodedBytes(t *testing.T) {
+	s := NewSubmitSM().(*SubmitSM)
+	require.NoError(t, s.Message.SetLongMessageWithEnc(strings.Repeat("A", 161), data.GSM7BIT))
+	s.Message.messageData[0] = 'B'
+	parts, err := s.Split()
+	require.NoError(t, err)
+	require.Equal(t, byte('B'), parts[0].Message.messageData[0], "cached text must not replace existing bytes")
+}
+
+func TestSplitRejectsLossyReencoding(t *testing.T) {
+	s := NewSubmitSM().(*SubmitSM)
+	payload := append(bytes.Repeat([]byte{0, 'A'}, 70), 0)
+	require.NoError(t, s.Message.SetMessageDataWithEncoding(payload, data.UCS2))
+	_, err := s.Split()
+	require.Error(t, err, "incomplete UTF16 must not turn into a replacement character")
+	require.Equal(t, payload, s.Message.messageData)
+}
+
+func TestLongMessagePackedSeptetBudgets(t *testing.T) {
+	for _, text := range []string{strings.Repeat("A", 160), strings.Repeat("A", 161), strings.Repeat("A", 152) + "^" + strings.Repeat("B", 7), strings.Repeat("@", 161)} {
+		parts, err := NewLongMessageWithEncoding(text, data.GSM7BITPACKED)
+		require.NoError(t, err)
+		var joined string
+		for _, p := range parts {
+			require.LessOrEqual(t, len(p.messageData)+p.UDH().UDHL(), 140)
+			wire := NewBuffer(nil)
+			request := NewSubmitSM().(*SubmitSM)
+			request.Message = *p
+			if p.UDH().UDHL() > 0 {
+				request.EsmClass = data.SM_UDH_GSM
+			}
+			request.Marshal(wire)
+			require.NoError(t, wire.Err())
+			parsed, err := Parse(bytes.NewReader(wire.Bytes()))
+			require.NoError(t, err)
+			got, err := parsed.(*SubmitSM).Message.GetMessageWithEncoding(data.GSM7BITPACKED)
+			require.NoError(t, err)
+			var septets []byte
+			for _, r := range got {
+				switch r {
+				case 'A':
+					septets = append(septets, 0x41)
+				case 'B':
+					septets = append(septets, 0x42)
+				case '@':
+					septets = append(septets, 0)
+				case '^':
+					septets = append(septets, 0x1b, 0x14)
+				default:
+					t.Fatalf("unexpected fixture rune %q", r)
+				}
+			}
+			b := NewBuffer(nil)
+			require.NoError(t, p.Marshal(b))
+			// TS 23.040 §9.2.3.24: start after the next septet boundary.
+			startBit := ((p.UDH().UDHL()*8 + 6) / 7) * 7
+			for i, want := range septets {
+				var value byte
+				for k := 0; k < 7; k++ {
+					bit := startBit + i*7 + k
+					value |= ((b.Bytes()[3+bit/8] >> (bit % 8)) & 1) << k
+				}
+				require.Equal(t, want, value, "packed septet %d", i)
+			}
+			joined += got
+		}
+		require.Equal(t, text, joined, "packed fill bits must not become text")
+	}
+}
+
+func TestPackedSetUDHPreservesRawPayload(t *testing.T) {
+	udh := UDH{NewIEConcatMessage(2, 1, 1)}
+	for _, count := range []int{7, 15} {
+		payload, err := encodeTextWithUDH(strings.Repeat("A", count), data.GSM7BITPACKED, udh)
+		require.NoError(t, err)
+		s, err := NewBinaryShortMessageWithEncoding(payload, data.GSM7BITPACKED)
+		require.NoError(t, err)
+		s.udHeader = udh
+		require.NoError(t, s.SetUDH(udh))
+		require.Equal(t, payload, s.messageData, "identical header must preserve packed wire bytes")
+		require.Error(t, s.SetUDH(UDH{NewIEConcatMessage16Bit(2, 1, 1)}), "raw packed alignment cannot guess a septet count")
+		require.Equal(t, payload, s.messageData)
+		require.Equal(t, udh, s.UDH())
+	}
+}
+
+func TestShortMessageSettersValidateFullLength(t *testing.T) {
+	s, err := NewBinaryShortMessage(make([]byte, 248))
+	require.NoError(t, err)
+	udh := UDH{NewIEConcatMessage(2, 1, 1)}
+	require.NoError(t, s.SetUDH(udh))
+	require.Error(t, s.SetMessageDataWithEncoding(make([]byte, 249), data.ASCII))
+	require.Equal(t, data.BINARY8BIT2, s.Encoding())
+	require.Len(t, s.messageData, 248)
+	require.Error(t, s.SetMessageWithEncoding(strings.Repeat("A", 249), data.ASCII))
+	require.Len(t, s.messageData, 248)
+	plain, err := NewBinaryShortMessage(make([]byte, 254))
+	require.NoError(t, err)
+	require.Error(t, plain.SetUDH(udh))
+	require.Empty(t, plain.UDH())
+	b := NewBuffer(nil)
+	require.NoError(t, plain.Marshal(b))
+	require.NoError(t, b.Err())
+	require.Equal(t, byte(254), b.Bytes()[2])
+	_, err = NewBinaryShortMessage(make([]byte, 255))
+	require.Error(t, err)
+}
+
+func TestShortMessageAcceptsWireLength255(t *testing.T) {
+	for _, cmd := range []data.CommandIDType{data.SUBMIT_SM, data.SUBMIT_MULTI, data.DELIVER_SM, data.REPLACE_SM} {
+		for _, udhi := range []bool{false, true} {
+			if udhi && cmd == data.REPLACE_SM {
+				continue
+			}
+			for _, n := range []int{254, 255} {
+				p, err := CreatePDUFromCmdID(cmd)
+				require.NoError(t, err)
+				b := NewBuffer(nil)
+				p.Marshal(b)
+				require.NoError(t, b.Err())
+				body := append([]byte(nil), b.Bytes()[16:]...)
+				body[len(body)-1] = byte(n)
+				payload := bytes.Repeat([]byte{'A'}, n)
+				if udhi {
+					offset := 7
+					if cmd == data.SUBMIT_MULTI {
+						offset = 5
+					}
+					body[offset] = data.SM_UDH_GSM
+					payload = append([]byte{5, 0, 3, 9, 2, 1}, bytes.Repeat([]byte{'A'}, n-6)...)
+				}
+				wire := decodeTestFrame(cmd, append(body, payload...))
+				parsed, err := Parse(bytes.NewReader(wire))
+				require.NoError(t, err)
+				require.Equal(t, n == 255, Validate(parsed) != nil)
+				var message ShortMessage
+				switch v := parsed.(type) {
+				case *SubmitSM:
+					message = v.Message
+				case *SubmitMulti:
+					message = v.Message
+				case *DeliverSM:
+					message = v.Message
+				case *ReplaceSM:
+					message = v.Message
+				}
+				got, err := message.GetMessageData()
+				require.NoError(t, err)
+				if udhi {
+					require.Equal(t, payload[6:], got)
+					total, part, ref, ok := message.UDH().GetConcatInfo()
+					require.True(t, ok)
+					require.EqualValues(t, 2, total)
+					require.EqualValues(t, 1, part)
+					require.EqualValues(t, 9, ref)
+				} else {
+					require.Equal(t, payload, got)
+				}
+
+				round := NewBuffer(nil)
+				parsed.Marshal(round)
+
+				require.NoError(t, round.Err())
+				require.Equal(t, wire, round.Bytes())
+			}
+		}
+	}
+}
+
+func TestShortMessageSetterFailurePreservesState(t *testing.T) {
+	s, err := NewShortMessage("ok")
+	require.NoError(t, err)
+	s.SmDefaultMsgID = 3
+	_ = s.SetUDH(UDH{NewIEConcatMessage(2, 1, 9)})
+	before := NewBuffer(nil)
+	_ = s.Marshal(before)
+	for _, text := range []string{strings.Repeat("A", 300), "😀"} {
+		require.Error(t, s.SetMessageWithEncoding(text, data.GSM7BIT))
+		after := NewBuffer(nil)
+		_ = s.Marshal(after)
+		require.Equal(t, before.Bytes(), after.Bytes(), "rejected setter changed wire content")
+		require.Equal(t, data.GSM7BIT, s.Encoding())
+	}
+}
+
+func TestShortMessageFullEncodedLength(t *testing.T) {
+	for _, n := range []int{248, 249, 250, 254, 255} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			s := ShortMessage{enc: data.BINARY8BIT2, messageData: make([]byte, n), udHeader: UDH{NewIEConcatMessage(2, 1, 1)}}
+			b := NewBuffer(nil)
+			_ = s.Marshal(b)
+			if n+6 > 255 {
+				require.Zero(t, b.Len(), "invalid full encoded length %d must emit no bytes", n+6)
+			} else {
+				require.Equal(t, n+6, int(b.Bytes()[2]))
+				require.Len(t, b.Bytes(), n+9)
+			}
+		})
+	}
+}
+
+func TestLongMessageSegmentCountLimit(t *testing.T) {
+	parts, err := NewLongMessageWithEncoding(strings.Repeat("A", 134*255), data.LATIN1)
+	require.NoError(t, err)
+	require.Len(t, parts, 255)
+	total, part, _, ok := parts[254].UDH().GetConcatInfo()
+	require.True(t, ok)
+	require.Equal(t, byte(255), total)
+	require.Equal(t, byte(255), part)
+	_, err = NewLongMessageWithEncoding(strings.Repeat("A", 134*255+1), data.LATIN1)
+	require.Error(t, err, "256 segments cannot fit concatenation count")
+}
+
+func TestLongMessageUnpackedSeptetBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		sizes []int
+	}{
+		{strings.Repeat("A", 160), []int{160}},
+		{strings.Repeat("A", 161), []int{153, 8}},
+		{strings.Repeat("A", 300), []int{153, 147}},
+		{strings.Repeat("^", 80), []int{160}},
+		{strings.Repeat("A", 152) + "^" + strings.Repeat("B", 7), []int{152, 9}},
+	} {
+		parts, err := NewLongMessage(tc.text)
+		require.NoError(t, err)
+		require.Len(t, parts, len(tc.sizes), "wrong septet budget")
+		var joined string
+		for i, p := range parts {
+			require.Len(t, p.messageData, tc.sizes[i])
+			text, err := p.GetMessage()
+			require.NoError(t, err)
+			joined += text
+		}
+		require.Equal(t, tc.text, joined)
+	}
+}
+
+func TestLongMessageUTF16OctetBudgets(t *testing.T) {
+	for _, text := range []string{strings.Repeat("😀", 40), strings.Repeat("😀", 71), strings.Repeat("A", 66) + "😀" + strings.Repeat("B", 4)} {
+		parts, err := NewLongMessageWithEncoding(text, data.UCS2)
+		require.NoError(t, err)
+		var joined string
+		for _, p := range parts {
+			require.LessOrEqual(t, len(p.messageData)+p.UDH().UDHL(), 140, "UTF16 encoded octet budget")
+			decoded, err := p.GetMessage()
+			require.NoError(t, err)
+			joined += decoded
+		}
+		require.Equal(t, text, joined)
+	}
+}
+
+func TestSplitExistingEncodedMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		enc     data.Encoding
+	}{
+		{"parsed", []byte("hello"), data.GSM7BIT},
+		{"binary", []byte{1, 2, 3}, data.BINARY8BIT2},
+		{"binaryLong", bytes.Repeat([]byte{0xa5}, 141), data.BINARY8BIT2},
+		{"parsedLong", bytes.Repeat([]byte{'A'}, 161), data.GSM7BIT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSubmitSM().(*SubmitSM)
+			var err error
+			s.Message, err = NewBinaryShortMessageWithEncoding(tc.payload, tc.enc)
+			require.NoError(t, err)
+			b := NewBuffer(nil)
+			s.Marshal(b)
+			parsed, err := Parse(bytes.NewReader(b.Bytes()))
+			require.NoError(t, err)
+			parts, err := parsed.(*SubmitSM).Split()
+			require.NoError(t, err)
+			var joined []byte
+			for _, p := range parts {
+				joined = append(joined, p.Message.messageData...)
+			}
+			require.Equal(t, tc.payload, joined, "Split must preserve encoded content")
+		})
+	}
+}
 
 type customEncoder struct{}
 
@@ -58,7 +345,7 @@ func TestShortMessage(t *testing.T) {
 		require.NoError(t, err)
 
 		b := NewBuffer(nil)
-		senderSM.Marshal(b)
+		_ = senderSM.Marshal(b)
 
 		// From here the message is not know anymore to the receiver in terms of encoding methods, but the receiver wants to know the encoding code once receiving the packet
 		var receivedSM ShortMessage
@@ -97,7 +384,7 @@ func TestShortMessage(t *testing.T) {
 		require.NoError(t, err)
 
 		buf := NewBuffer(nil)
-		s.Marshal(buf)
+		_ = s.Marshal(buf)
 
 		require.Equal(t, "0400050001020304", toHex(buf.Bytes()))
 	})
@@ -110,7 +397,7 @@ func TestShortMessage(t *testing.T) {
 		s.enc = nil
 
 		buf := NewBuffer(nil)
-		s.Marshal(buf)
+		_ = s.Marshal(buf)
 		require.Equal(t, "00000461626300", toHex(buf.Bytes()))
 	})
 
@@ -119,7 +406,7 @@ func TestShortMessage(t *testing.T) {
 		require.NoError(t, err)
 
 		buf := NewBuffer(nil)
-		s.Marshal(buf)
+		_ = s.Marshal(buf)
 		require.Equal(t, "000003616263", toHex(buf.Bytes()))
 	})
 
@@ -128,7 +415,7 @@ func TestShortMessage(t *testing.T) {
 		require.NoError(t, err)
 
 		buf := NewBuffer(nil)
-		s.Marshal(buf)
+		_ = s.Marshal(buf)
 
 		require.Equal(t, 116, len(buf.Bytes()))
 	})
@@ -136,10 +423,10 @@ func TestShortMessage(t *testing.T) {
 	t.Run("marshalGSM7WithUDHConcat", func(t *testing.T) {
 		s, err := NewShortMessageWithEncoding("abc", data.GSM7BIT)
 		require.NoError(t, err)
-		s.SetUDH(UDH{NewIEConcatMessage(2, 1, 12)})
+		_ = s.SetUDH(UDH{NewIEConcatMessage(2, 1, 12)})
 
 		buf := NewBuffer(nil)
-		s.Marshal(buf)
+		_ = s.Marshal(buf)
 		require.Equal(t, "0000090500030c0201616263", toHex(buf.Bytes()))
 	})
 
@@ -182,11 +469,11 @@ func TestShortMessage(t *testing.T) {
 	})
 
 	t.Run("shortMessageSplitGSM7_160chars", func(t *testing.T) {
-		// over gsm7 chars limit ( 160/160 ), split
+		// TS 23.038 §6.1.2.1: 160 default-alphabet septets fit one SMS.
 		sm, err := NewLongMessageWithEncoding("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz1234", data.GSM7BIT)
 		require.NoError(t, err)
 
-		require.Equal(t, 2, len(sm))
+		require.Equal(t, 1, len(sm))
 	})
 
 	t.Run("shortMessageSplitUCS2_89chars", func(t *testing.T) {
@@ -220,9 +507,394 @@ func TestShortMessage(t *testing.T) {
 
 		for i := range multiSM {
 			b1, b2 := NewBuffer(nil), NewBuffer(nil)
-			multiSM[i].Marshal(b1)
-			multiSM[i].Marshal(b2)
+			_ = multiSM[i].Marshal(b1)
+			_ = multiSM[i].Marshal(b2)
 			require.Equal(t, b1.Bytes(), b2.Bytes())
 		}
 	})
+}
+
+func TestPackedMessageWireDecoding(t *testing.T) {
+	for _, u := range []UDH{nil, {NewIEConcatMessage(2, 1, 1)}, {NewIEConcatMessage(2, 1, 1), {ID: 0x70}}} {
+		for n := 1; n <= 170; n++ {
+			text := strings.Repeat("A", n)
+			if n == 7 {
+				text = "testing"
+			}
+			s, err := NewShortMessageWithEncoding(text, data.GSM7BITPACKED)
+			require.NoError(t, err)
+			require.NoError(t, s.SetUDH(u))
+			p := NewSubmitSM().(*SubmitSM)
+			p.Message = s
+			if u != nil {
+				p.EsmClass = data.SM_UDH_GSM
+			}
+			wire := NewBuffer(nil)
+			p.Marshal(wire)
+			require.NoError(t, wire.Err())
+			parsed, err := Parse(bytes.NewReader(wire.Bytes()))
+			require.NoError(t, err)
+			got, err := parsed.(*SubmitSM).Message.GetMessageWithEncoding(data.GSM7BITPACKED)
+			require.NoError(t, err)
+			require.Equal(t, text, got, "header %d length %d", u.UDHL(), n)
+		}
+	}
+}
+func TestCustomGSMAlphabetSplitting(t *testing.T) {
+	for _, coding := range []byte{0x10, 0x40, 0xF0, 0xF1} {
+		enc := data.FromDataCoding(coding)
+		for _, text := range []string{strings.Repeat("a", 133) + "€" + strings.Repeat("b", 10), strings.Repeat("A", 160), strings.Repeat("A", 161), strings.Repeat("A", 152) + "€" + strings.Repeat("B", 8)} {
+			p := NewSubmitSM().(*SubmitSM)
+			require.NoError(t, p.Message.SetLongMessageWithEnc(text, enc))
+			septets, err := enc.Encode(text)
+			require.NoError(t, err)
+			require.Equal(t, len(septets) > 160, p.ShouldSplit())
+			parts, err := p.Split()
+			require.NoError(t, err)
+			var joined string
+			for _, part := range parts {
+				wire := NewBuffer(nil)
+				part.Marshal(wire)
+				require.NoError(t, wire.Err())
+				parsed, err := Parse(bytes.NewReader(wire.Bytes()))
+				require.NoError(t, err)
+				sm := parsed.(*SubmitSM).Message
+				got, err := sm.GetMessage()
+				require.NoError(t, err)
+				joined += got
+				raw, _ := sm.GetMessageData()
+				limit := 160
+				if len(parts) > 1 {
+					limit = 153
+				}
+				require.LessOrEqual(t, len(raw), limit)
+				require.Equal(t, coding, sm.Encoding().DataCoding())
+			}
+			require.Equal(t, text, joined)
+			if text == strings.Repeat("A", 161) {
+				first, _ := parts[0].Message.GetMessageData()
+				require.Len(t, first, 153, "custom GSM concatenation uses 153 septets")
+			}
+			if len(septets) <= 160 {
+				require.Len(t, parts, 1)
+			}
+		}
+	}
+}
+func TestIgnoredUDHPreservesPayloadAndWire(t *testing.T) {
+	for _, header := range [][]byte{{4, 0, 3, 1, 2}, {1, 0}, {6, 0, 3, 1, 2, 1, 0x70}, {0}} {
+		p := NewSubmitSM().(*SubmitSM)
+		p.EsmClass = data.SM_UDH_GSM
+		require.NoError(t, p.Message.SetMessageDataWithEncoding(append(append([]byte(nil), header...), []byte("hello")...), data.GSM7BIT))
+		wire := NewBuffer(nil)
+		p.Marshal(wire)
+		require.NoError(t, wire.Err())
+		parsed, err := Parse(bytes.NewReader(wire.Bytes()))
+		require.NoError(t, err)
+		sm := parsed.(*SubmitSM).Message
+		require.Empty(t, sm.UDH())
+		payload, _ := sm.GetMessageData()
+		require.Equal(t, []byte("hello"), payload)
+		round := NewBuffer(nil)
+		parsed.Marshal(round)
+		require.NoError(t, round.Err())
+		require.Equal(t, wire.Bytes(), round.Bytes())
+	}
+}
+func TestSplitDropsSARParameters(t *testing.T) {
+	p := NewSubmitSM().(*SubmitSM)
+	require.NoError(t, p.Message.SetLongMessageWithEnc(strings.Repeat("A", 200), data.GSM7BIT))
+	for _, field := range []Field{NewFieldUint16(TagSarMsgRefNum, 42), NewFieldUint8(TagSarTotalSegments, 1), NewFieldUint8(TagSarSegmentSeqnum, 1), NewFieldUint8(TagSarSegmentSeqnum, 3), NewFieldUint8(TagUserMessageReference, 7)} {
+		p.AppendOptionalParam(field)
+	}
+	parts, err := p.Split()
+	require.NoError(t, err)
+	require.Len(t, parts, 2)
+	for _, part := range parts {
+		_, _, _, ok := part.GetSARConcatInfo()
+		require.False(t, ok)
+		for _, tag := range []Tag{TagSarMsgRefNum, TagSarTotalSegments, TagSarSegmentSeqnum} {
+			require.Empty(t, part.GetOptionalParams(tag))
+		}
+		_, ok = part.GetOptionalParam(TagUserMessageReference)
+		require.True(t, ok)
+	}
+	require.Len(t, p.OptionalParameters, 5)
+}
+
+func TestSplitRejectsAmbiguousRawPackedPadding(t *testing.T) {
+	// Legacy zero padding cannot distinguish 167 A septets from 168 ending @.
+	raw := make([]byte, 147)
+	for i := 0; i < 167; i++ {
+		bit := i * 7
+		raw[bit/8] |= 0x41 << uint(bit%8)
+		if bit%8 > 1 {
+			raw[bit/8+1] |= 0x41 >> uint(8-bit%8)
+		}
+	}
+	sm, err := NewBinaryShortMessageWithEncoding(raw, data.GSM7BITPACKED)
+	require.NoError(t, err)
+	_, err = sm.split()
+	require.Error(t, err)
+	require.Equal(t, raw, sm.messageData)
+}
+
+func TestPackedMessageWirePadding(t *testing.T) {
+	for _, u := range []UDH{nil, {NewIEConcatMessage(2, 1, 1)}, {NewIEConcatMessage16Bit(2, 1, 1)}, {NewIEConcatMessage(2, 1, 1), {ID: 0x70}}} {
+		fill := packedFillBits(u.UDHL())
+		for n := 1; n <= 40; n++ {
+			if (8-(n*7+fill)%8)%8 != 7 {
+				continue
+			}
+			sm, err := NewShortMessageWithEncoding(strings.Repeat("A", n), data.GSM7BITPACKED)
+			require.NoError(t, err)
+			require.NoError(t, sm.SetUDH(u))
+			request := NewSubmitSM().(*SubmitSM)
+			request.Message = sm
+			if u != nil {
+				request.EsmClass = data.SM_UDH_GSM
+			}
+			wire := NewBuffer(nil)
+			request.Marshal(wire)
+			require.NoError(t, wire.Err())
+			parsed, err := Parse(bytes.NewReader(wire.Bytes()))
+			require.NoError(t, err)
+			raw, _ := parsed.(*SubmitSM).Message.GetMessageData()
+			bit := fill + n*7
+			var pad byte
+			for k := 0; k < 7; k++ {
+				pad |= ((raw[(bit+k)/8] >> uint((bit+k)%8)) & 1) << uint(k)
+			}
+			require.Equal(t, byte(0x0d), pad, "fill %d septets %d", fill, n)
+		}
+	}
+}
+
+func TestIgnoredPackedUDHSettersUseWireAlignment(t *testing.T) {
+	p := NewSubmitSM().(*SubmitSM)
+	p.EsmClass = data.SM_UDH_GSM
+	require.NoError(t, p.Message.SetMessageDataWithEncoding([]byte{3, 0, 3, 1, 'A'}, data.GSM7BIT))
+	b := NewBuffer(nil)
+	p.Marshal(b)
+	parsed, err := Parse(bytes.NewReader(b.Bytes()))
+	require.NoError(t, err)
+	sm := parsed.(*SubmitSM).Message
+	require.Equal(t, []byte{3, 0, 3, 1}, sm.IgnoredUDH())
+	raw := sm.IgnoredUDH()
+	raw[0] = 99
+	require.Equal(t, byte(3), sm.IgnoredUDH()[0])
+	require.NoError(t, sm.SetMessageWithEncoding("AA@", data.GSM7BITPACKED))
+	got, err := sm.GetMessage()
+	require.NoError(t, err)
+	require.Equal(t, "AA@", got)
+	require.NoError(t, sm.SetMessageWithEncoding("ABC", data.GSM7BITPACKED))
+	require.NoError(t, sm.SetUDH(UDH{NewIEConcatMessage(2, 1, 1)}))
+	require.Empty(t, sm.IgnoredUDH())
+	got, err = sm.GetMessage()
+	require.NoError(t, err)
+	require.Equal(t, "ABC", got)
+}
+
+func TestCustomDefaultAlphabetUsesSuppliedCodec(t *testing.T) {
+	for _, coding := range []byte{0, 0x10, 0x80} {
+		enc := data.NewCustomEncoding(coding, data.UCS2)
+		for _, n := range []int{70, 71, 100} {
+			text := strings.Repeat("A", n)
+			parts, err := NewLongMessageWithEncoding(text, enc)
+			require.NoError(t, err)
+			var joined string
+			for _, part := range parts {
+				raw, _ := part.GetMessageData()
+				require.LessOrEqual(t, len(raw)+part.UDH().UDHL(), 140)
+				got, err := enc.Decode(raw)
+				require.NoError(t, err)
+				joined += got
+			}
+			require.Equal(t, text, joined)
+			if n == 70 {
+				require.Len(t, parts, 1)
+			} else {
+				require.Greater(t, len(parts), 1)
+			}
+		}
+	}
+}
+func TestSplitRejectsAmbiguousCRPackedPadding(t *testing.T) {
+	for _, text := range []string{strings.Repeat("A", 167), strings.Repeat("A", 167) + "\r", strings.Repeat("A", 167) + "@", strings.Repeat("A", 167) + "\r\r"} {
+		raw, err := data.GSM7BITPACKED.Encode(text)
+		require.NoError(t, err)
+		sm, err := NewBinaryShortMessageWithEncoding(raw, data.GSM7BITPACKED)
+		require.NoError(t, err)
+		_, err = sm.split()
+		require.Error(t, err, "raw tail has no septet count for %q", text)
+		require.Equal(t, raw, sm.messageData)
+		known, err := NewShortMessageWithEncoding(text, data.GSM7BITPACKED)
+		require.NoError(t, err)
+		_, err = known.split()
+		require.NoError(t, err, "retained original source text resolves the count")
+	}
+}
+
+func TestMarshalRejectsTruncatedDeclaredUDH(t *testing.T) {
+	for _, p := range []PDU{NewSubmitSM(), NewSubmitMulti(), NewDeliverSM()} {
+		var sm *ShortMessage
+		switch v := p.(type) {
+		case *SubmitSM:
+			v.EsmClass = data.SM_UDH_GSM
+			sm = &v.Message
+		case *SubmitMulti:
+			v.EsmClass = data.SM_UDH_GSM
+			sm = &v.Message
+		case *DeliverSM:
+			v.EsmClass = data.SM_UDH_GSM
+			sm = &v.Message
+		}
+		require.NoError(t, sm.SetMessageDataWithEncoding([]byte{5, 0, 3}, data.GSM7BIT))
+		b := NewBuffer(nil)
+		p.Marshal(b)
+		require.Error(t, b.Err())
+		require.Empty(t, b.Bytes())
+	}
+}
+
+func TestCustomPackedCodecAlignment(t *testing.T) {
+	enc := data.NewCustomEncoding(0, data.GSM7BITPACKED)
+	for _, u := range []UDH{{NewIEConcatMessage(2, 1, 1)}, {NewIEConcatMessage(2, 1, 1), {ID: 0x70}}} {
+		sm, err := NewShortMessageWithEncoding("testing", enc)
+		require.NoError(t, err)
+		require.NoError(t, sm.SetUDH(u))
+		p := NewSubmitSM().(*SubmitSM)
+		p.EsmClass = data.SM_UDH_GSM
+		p.Message = sm
+		b := NewBuffer(nil)
+		p.Marshal(b)
+		parsed, err := Parse(bytes.NewReader(b.Bytes()))
+		require.NoError(t, err)
+		raw, _ := parsed.(*SubmitSM).Message.GetMessageData()
+		expected, err := encodeTextWithUDH("testing", data.GSM7BITPACKED, u)
+		require.NoError(t, err)
+		require.Equal(t, expected, raw)
+		got, err := parsed.(*SubmitSM).Message.GetMessageWithEncoding(enc)
+		require.NoError(t, err)
+		require.Equal(t, "testing", got)
+	}
+}
+
+type identityTextCodec struct{}
+
+func (identityTextCodec) Encode(s string) ([]byte, error) { return []byte(s), nil }
+func (identityTextCodec) Decode(b []byte) (string, error) { return string(b), nil }
+func TestCustomCodecWithoutSplitterFitsWireField(t *testing.T) {
+	enc := data.NewCustomEncoding(0x03, data.NewCustomEncoding(0x03, identityTextCodec{}))
+	for _, tc := range []struct {
+		name    string
+		header  UDH
+		maximum int
+	}{{"plain", nil, 254}, {"UDH", UDH{NewIEConcatMessage(1, 1, 7)}, 248}} {
+		for _, n := range []int{140, 141, 200, tc.maximum, tc.maximum + 1, 256} {
+			t.Run(fmt.Sprintf("%s/%d", tc.name, n), func(t *testing.T) {
+				p := NewSubmitSM().(*SubmitSM)
+				require.NoError(t, p.Message.SetUDH(tc.header))
+				if tc.header != nil {
+					p.EsmClass = data.SM_UDH_GSM
+				}
+				require.NoError(t, p.Message.SetLongMessageWithEnc(strings.Repeat("x", n), enc))
+				require.Equal(t, n > tc.maximum, p.ShouldSplit())
+				parts, err := p.Split()
+				if n > tc.maximum {
+					require.Error(t, err)
+					return
+				}
+				require.NoError(t, err)
+				require.Len(t, parts, 1)
+				require.Same(t, p, parts[0])
+				require.NoError(t, Validate(p))
+				b := NewBuffer(nil)
+				p.Marshal(b)
+				require.NoError(t, b.Err())
+				q, err := Parse(b)
+				require.NoError(t, err)
+				raw, _ := q.(*SubmitSM).Message.GetMessageData()
+				require.Equal(t, strings.Repeat("x", n), string(raw))
+			})
+		}
+	}
+}
+
+func TestCustomCodecWithoutSplitterConstructorLimit(t *testing.T) {
+	enc := data.NewCustomEncoding(0x03, identityTextCodec{})
+	for _, n := range []int{254, 255} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			parts, err := NewLongMessageWithEncoding(strings.Repeat("x", n), enc)
+			if n == 255 {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, parts, 1)
+			p := NewSubmitSM().(*SubmitSM)
+			p.Message = *parts[0]
+			require.NoError(t, Validate(p))
+		})
+	}
+}
+
+func TestOpaqueTextCodingSplitBudgets(t *testing.T) {
+	for _, code := range []byte{0x05, 0x09, 0x0a, 0x0d, 0x0e} {
+		for _, n := range []int{140, 141} {
+			p := NewSubmitSM().(*SubmitSM)
+			require.NoError(t, p.Message.SetMessageDataWithEncoding(make([]byte, n), data.FromDataCoding(code)))
+			parts, err := p.Split()
+			if n == 141 {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, parts, 1)
+				require.Equal(t, code, parts[0].Message.Encoding().DataCoding())
+			}
+		}
+	}
+}
+
+func TestPackedTerminalCRPaddingOnWire(t *testing.T) {
+	for _, header := range []UDH{nil, {NewIEConcatMessage(1, 1, 7)}} {
+		for _, n := range []int{8, 9, 16, 17} {
+			text := strings.Repeat("A", n-1) + "\r"
+			p := NewSubmitSM().(*SubmitSM)
+			require.NoError(t, p.Message.SetUDH(header))
+			if header != nil {
+				p.EsmClass = data.SM_UDH_GSM
+			}
+			require.NoError(t, p.Message.SetMessageWithEncoding(text, data.GSM7BITPACKED))
+			b := NewBuffer(nil)
+			p.Marshal(b)
+			require.NoError(t, b.Err())
+			q, err := Parse(b)
+			require.NoError(t, err)
+			m := q.(*SubmitSM).Message
+			got, err := m.GetMessageWithEncoding(data.GSM7BITPACKED)
+			require.NoError(t, err)
+			require.Equal(t, text, got)
+		}
+	}
+}
+
+func TestPackedSplitPreservesLiteralDoubleCR(t *testing.T) {
+	text := strings.Repeat("A", 297) + "\r\r"
+	p := NewSubmitSM().(*SubmitSM)
+	require.NoError(t, p.Message.SetLongMessageWithEnc(text, data.GSM7BITPACKED))
+	parts, err := p.Split()
+	require.NoError(t, err)
+	var joined string
+	for _, part := range parts {
+		b := NewBuffer(nil)
+		part.Marshal(b)
+		require.NoError(t, b.Err())
+		q, err := Parse(b)
+		require.NoError(t, err)
+		got, err := q.(*SubmitSM).Message.GetMessageWithEncoding(data.GSM7BITPACKED)
+		require.NoError(t, err)
+		joined += got
+	}
+	require.Equal(t, text, joined)
 }

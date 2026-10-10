@@ -45,8 +45,8 @@ func NewSubmitSM() PDU {
 
 // ShouldSplit check if this the user data of submitSM PDU
 func (c *SubmitSM) ShouldSplit() bool {
-	// GSM standard mandates that User Data must be no longer than 140 octet
-	return len(c.Message.messageData) > data.SM_GSM_MSG_LEN
+	limit := c.Message.payloadLimit()
+	return limit < 0 || len(c.Message.messageData) > limit
 }
 
 // CanResponse implements PDU interface.
@@ -99,15 +99,20 @@ func (c *SubmitSM) baseForSplitPart() base {
 	b := newBase()
 	b.CommandID = c.CommandID
 	b.CommandStatus = c.CommandStatus
-	b.OptionalParameters = make(map[Tag]Field, len(c.OptionalParameters))
-	for tag, field := range c.OptionalParameters {
+	b.OptionalParameters = make([]Field, 0, len(c.OptionalParameters))
+	for _, field := range c.OptionalParameters {
+		// UDH carries the new concatenation metadata; do not retain stale SAR.
+		if field.Tag == TagSarMsgRefNum || field.Tag == TagSarTotalSegments || field.Tag == TagSarSegmentSeqnum {
+			continue
+		}
 		field.Data = append([]byte(nil), field.Data...)
-		b.OptionalParameters[tag] = field
+		b.OptionalParameters = append(b.OptionalParameters, field)
 	}
 	return b
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.4.1 Table 4-10: C-Octet maxima include NUL.
 func (c *SubmitSM) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.ServiceType) + len(c.ScheduleDeliveryTime) + len(c.ValidityPeriod) + 10)
@@ -122,7 +127,11 @@ func (c *SubmitSM) Marshal(b *ByteBuffer) {
 		_ = b.WriteCString(c.ValidityPeriod)
 		_ = b.WriteByte(c.RegisteredDelivery)
 		_ = b.WriteByte(c.ReplaceIfPresentFlag)
-		c.Message.Marshal(b)
+		if err := c.Message.validateUDHI(c.EsmClass&data.SM_UDH_GSM != 0); err != nil {
+			b.setError(err)
+			return
+		}
+		_ = c.Message.Marshal(b)
 	})
 }
 
@@ -130,8 +139,8 @@ func (c *SubmitSM) Marshal(b *ByteBuffer) {
 func (c *SubmitSM) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.ServiceType, err = b.ReadCString(); err == nil {
-			if err = c.SourceAddr.Unmarshal(b); err == nil {
-				if err = c.DestAddr.Unmarshal(b); err == nil {
+			if err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
+				if err = c.DestAddr.unmarshal(b, data.ESME_RINVDSTADR); err == nil {
 					if c.EsmClass, err = b.ReadByte(); err == nil {
 						if c.ProtocolID, err = b.ReadByte(); err == nil {
 							if c.PriorityFlag, err = b.ReadByte(); err == nil {

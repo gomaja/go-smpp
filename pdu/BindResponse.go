@@ -91,7 +91,8 @@ func (c *BindResp) Marshal(b *ByteBuffer) {
 //
 // Accept both header-only errors and peers that include the system_id field.
 // An absent field is tolerated so that responses omitting system_id still parse,
-// matching how SubmitSMResp handles its message_id.
+// matching how SubmitSMResp handles its message_id. A final unterminated
+// system_id is also retained up to the frame boundary for interoperability.
 func (c *BindResp) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(w *ByteBuffer) (err error) {
 		c.SystemID, err = w.ReadCString()

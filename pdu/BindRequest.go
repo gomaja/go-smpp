@@ -79,6 +79,7 @@ func (b *BindRequest) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §3.3: support longer peer-issued credentials for interoperability.
 func (b *BindRequest) Marshal(w *ByteBuffer) {
 	b.base.marshal(w, func(w *ByteBuffer) {
 		w.Grow(len(b.SystemID) + len(b.Password) + len(b.SystemType) + 4)

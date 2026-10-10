@@ -2,6 +2,7 @@ package pdu
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gomaja/go-smpp/data"
 )
@@ -19,7 +20,11 @@ func NewDistributionList(name string) (c DistributionList, err error) {
 
 // Unmarshal from buffer.
 func (c *DistributionList) Unmarshal(b *ByteBuffer) (err error) {
-	c.name, err = b.ReadCString()
+	var name string
+	name, err = b.ReadCString()
+	if err == nil {
+		c.name = name
+	}
 	return
 }
 
@@ -32,8 +37,12 @@ func (c *DistributionList) Marshal(b *ByteBuffer) {
 
 // SetName sets DistributionList name.
 func (c *DistributionList) SetName(name string) (err error) {
-	if len(name) > data.SM_DL_NAME_LEN {
-		err = fmt.Errorf("distribution list name exceed limit. (%d > %d)", len(name), data.SM_DL_NAME_LEN)
+	// SMPP v3.4 §4.5.1.2 Table 4-15: dl_name maximum includes NUL.
+	if strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("distribution list contains an embedded terminator")
+	}
+	if len(name)+1 > data.SM_DL_NAME_LEN {
+		err = fmt.Errorf("distribution list name exceed limit. (%d > %d)", len(name)+1, data.SM_DL_NAME_LEN)
 	} else {
 		c.name = name
 	}

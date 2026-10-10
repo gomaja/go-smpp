@@ -40,6 +40,8 @@ func (c *DeliverSMResp) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.6.2 Table 4-19; nonempty IDs follow the
+// documented SMPP v5 §4.3.1.2 Table 4-23 interoperability tolerance.
 func (c *DeliverSMResp) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.MessageID) + 1)

@@ -437,6 +437,11 @@ func (srv *Server) SubmitToSystemID(ctx context.Context, systemID string, p pdu.
 		}
 		return ErrNoLiveSession
 	}
+	buf := pdu.NewBuffer(nil)
+	p.Marshal(buf)
+	if err := buf.Err(); err != nil {
+		return fmt.Errorf("submit to system ID %q: %w", systemID, &pdu.EncodeError{PDU: p, Err: err})
+	}
 	if err := target.trx.Load().SubmitContext(ctx, p); err != nil {
 		return fmt.Errorf("submit to system ID %q: %w", systemID, err)
 	}
@@ -572,8 +577,13 @@ func (s *serverSession) startIO() error {
 		OnReceivingError: func(err error) {
 			s.reportIOError(err)
 		},
-		OnSubmitError: func(_ pdu.PDU, err error) { s.reportIOError(err); s.close() },
-		OnClosed:      func(State) { s.close() }}
+		OnSubmitError: func(_ pdu.PDU, err error) {
+			s.reportIOError(err)
+			if !errors.Is(err, pdu.ErrEncode) {
+				s.close()
+			}
+		},
+		OnClosed: func(State) { s.close() }}
 	trx := newTransceivable(NewConnection(s.conn), settings, nil)
 	s.trx.Store(trx)
 	trx.start()
@@ -601,30 +611,43 @@ func (s *serverSession) handlePDU(p pdu.PDU) (pdu.PDU, bool) {
 				return nil, false
 			}
 			r := p.GetResponse()
-			r.(interface{ SetCommandStatus(data.CommandStatusType) }).SetCommandStatus(data.ESME_RINVBNDSTS)
+			r.SetCommandStatus(data.ESME_RINVBNDSTS)
 			response = headerOnlyResponse{r}
 		} else if s.config.OnPDU != nil {
 			info := ServerSessionInfo{SystemID: s.systemID, BindingType: s.bindingType, InterfaceVersion: s.interfaceVersion, LocalAddr: s.conn.LocalAddr(), RemoteAddr: s.conn.RemoteAddr()}
 			response, closeBind = s.config.OnPDU(info, p)
 		} else if p.CanResponse() {
 			response = p.GetResponse()
-			response.(interface{ SetCommandStatus(data.CommandStatusType) }).SetCommandStatus(data.ESME_RSYSERR)
+			response.SetCommandStatus(data.ESME_RSYSERR)
 		}
 	}
 	if response != nil {
 		var err error
 		response, err = s.preparePDU(response)
-		if err != nil {
-			s.reportIOError(err)
-			s.close()
-			return nil, false
-		}
 		// Write the response synchronously so unbind_resp reaches the peer before
 		// closing. The shared Connection serializes this with the write daemon.
 		trx := s.trx.Load()
-		if _, err := trx.conn.writePDUWithTimeout(response, s.config.WriteTimeout); err != nil {
+		if err == nil {
+			_, err = trx.conn.writePDUWithTimeout(response, s.config.WriteTimeout)
+		}
+		if err != nil {
 			s.reportIOError(err)
-			closeBind = true
+			if errors.Is(err, pdu.ErrEncode) {
+				// SMPP v3.4 §2.8 and v5 §3.2.1.3: a local encoding
+				// failure replaces the reply with a header-only error response.
+				// Preserve the handler's request to close after writing the reply.
+				if p.CanResponse() {
+					fallback := p.GetResponse()
+					fallback.SetCommandStatus(data.ESME_RSYSERR)
+					fallback.SetSequenceNumber(p.GetSequenceNumber())
+					if _, fallbackErr := trx.conn.writePDUWithTimeout(headerOnlyResponse{fallback}, s.config.WriteTimeout); fallbackErr != nil {
+						s.reportIOError(fallbackErr)
+						closeBind = true
+					}
+				}
+			} else {
+				closeBind = true
+			}
 		}
 	}
 	if closeBind {
@@ -671,18 +694,20 @@ func (s *serverSession) preparePDU(p pdu.PDU) (pdu.PDU, error) {
 	}
 	b := pdu.NewBuffer(nil)
 	p.Marshal(b)
+	if err := b.Err(); err != nil {
+		return nil, &pdu.EncodeError{PDU: p, Err: err}
+	}
 	copyPDU, err := pdu.Parse(bytes.NewReader(b.Bytes()))
 	if err != nil {
 		return nil, s.contextError(err)
 	}
-	clear(copyPDU.(interface{ GetOptionalParameters() map[pdu.Tag]pdu.Field }).GetOptionalParameters())
+	copyPDU.ClearOptionalParameters()
 	s.server.reportError(s.contextError(&UnsupportedOptionalParametersError{SystemID: s.systemID, InterfaceVersion: s.interfaceVersion, Stripped: true}))
 	return copyPDU, nil
 }
 
 func hasOptionalParameters(p pdu.PDU) bool {
-	params, ok := p.(interface{ GetOptionalParameters() map[pdu.Tag]pdu.Field })
-	return ok && len(params.GetOptionalParameters()) != 0
+	return len(p.GetOptionalParameters()) != 0
 }
 
 // permitsInbound follows SMPP v3.4 §2.3 Table 2-1, clarified by §§2.5–2.7:

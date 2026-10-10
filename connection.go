@@ -69,6 +69,9 @@ func (c *Connection) writePDUWithTimeout(p pdu.PDU, timeout time.Duration) (int,
 func (c *Connection) writePDU(p pdu.PDU) (n int, err error) {
 	buf := pdu.NewBuffer(make([]byte, 0, 64))
 	p.Marshal(buf)
+	if err = buf.Err(); err != nil {
+		return 0, &pdu.EncodeError{PDU: p, Err: err}
+	}
 	n, err = c.conn.Write(buf.Bytes())
 	if err == nil && n != buf.Len() {
 		err = io.ErrShortWrite

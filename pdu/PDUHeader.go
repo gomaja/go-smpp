@@ -8,14 +8,18 @@ import (
 )
 
 func nextSequenceNumber(s *int32) (v int32) {
-	// & 0x7FFFFFFF: cater for integer overflow
-	// Allowed range is 0x01 to 0x7FFFFFFF. This
-	// will still result in a single invalid value
-	// of 0x00 every ~2 billion PDUs (not too bad):
-	if v = atomic.AddInt32(s, 1) & 0x7FFFFFFF; v <= 0 {
+	// SMPP v3.4 §5.1.4: 1..0x7fffffff. Publish the wrapped value
+	// atomically so the following caller receives 2, including under contention.
+	for {
+		old := atomic.LoadInt32(s)
 		v = 1
+		if old > 0 && old < 0x7fffffff {
+			v = old + 1
+		}
+		if atomic.CompareAndSwapInt32(s, old, v) {
+			return
+		}
 	}
-	return
 }
 
 // Header represents PDU header.

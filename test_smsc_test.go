@@ -13,7 +13,7 @@ import (
 	"github.com/gomaja/go-smpp/pdu"
 )
 
-const testSMSCSystemID = "go-smpp-test-smsc"
+const testSMSCSystemID = "go-smpp-smsc"
 
 var testSMSCMessageID int32
 

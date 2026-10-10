@@ -1,9 +1,8 @@
 package data
 
 import (
-	"bytes"
 	"errors"
-	"math"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/transform"
@@ -95,7 +94,7 @@ func ValidateGSM7Buffer(buffer []byte) []byte {
 				break
 			}
 			e := buffer[count]
-			if _, ok := reverseEscape[e]; !ok {
+			if _, ok := decodeGSM7Rune(e, true); !ok {
 				invalidBytes = append(invalidBytes, b, e)
 			}
 		} else if _, ok := reverseLookup[b]; !ok {
@@ -126,7 +125,14 @@ func IsEscapeChar(c rune) bool {
 // GSM7 returns a GSM 7-bit Bit Encoding.
 //
 // Set the packed flag to true if you wish to convert septets to octets,
-// this should be false for most SMPP providers.
+// this should be false for most SMPP providers. The packed encoder uses CR in
+// seven spare bits as an interoperability convention, matching the padding
+// rule for USSD in TS 23.038 §6.1.2.3.1. SMS packing itself permits zero fill
+// (TS 23.038 §6.1.2.1.1). The decoder accepts both conventions; use
+// DecodeGSM7Packed with an explicit septet count when a literal final @ or CR
+// could otherwise be mistaken for padding. A terminal CR at an octet boundary
+// receives a second CR; without a count, this is indistinguishable from two
+// literal CRs straddling that boundary.
 func GSM7(packed bool) encoding.Encoding {
 	return gsm7Encoding{packed: packed}
 }
@@ -155,224 +161,268 @@ func (g gsm7Encoding) String() string {
 }
 
 type gsm7Decoder struct {
-	packed bool
+	packed     bool
+	bits       uint16
+	nBits      uint
+	octets     uint
+	last       byte
+	lastSeptet byte
+	escape     bool
 }
 
-func (g *gsm7Decoder) Reset() { /* not needed */ }
-
-func unpack(src []byte, packed bool) (septets []byte) {
-	septets = src
-	if packed {
-		septets = make([]byte, 0, len(src))
-		count := 0
-		for remain := len(src) - count; remain > 0; {
-			// Unpack by converting octets into septets.
-			switch {
-			case remain >= 7:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				septets = append(septets, (src[count+1]&0x3F<<1)|(src[count+0]&0x80>>7))
-				septets = append(septets, (src[count+2]&0x1F<<2)|(src[count+1]&0xC0>>6))
-				septets = append(septets, (src[count+3]&0x0F<<3)|(src[count+2]&0xE0>>5))
-				septets = append(septets, (src[count+4]&0x07<<4)|(src[count+3]&0xF0>>4))
-				septets = append(septets, (src[count+5]&0x03<<5)|(src[count+4]&0xF8>>3))
-				septets = append(septets, (src[count+6]&0x01<<6)|(src[count+5]&0xFC>>2))
-				if src[count+6] > 0 {
-					septets = append(septets, src[count+6]&0xFE>>1)
-				}
-				count += 7
-			case remain >= 6:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				septets = append(septets, (src[count+1]&0x3F<<1)|(src[count+0]&0x80>>7))
-				septets = append(septets, (src[count+2]&0x1F<<2)|(src[count+1]&0xC0>>6))
-				septets = append(septets, (src[count+3]&0x0F<<3)|(src[count+2]&0xE0>>5))
-				septets = append(septets, (src[count+4]&0x07<<4)|(src[count+3]&0xF0>>4))
-				septets = append(septets, (src[count+5]&0x03<<5)|(src[count+4]&0xF8>>3))
-				count += 6
-			case remain >= 5:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				septets = append(septets, (src[count+1]&0x3F<<1)|(src[count+0]&0x80>>7))
-				septets = append(septets, (src[count+2]&0x1F<<2)|(src[count+1]&0xC0>>6))
-				septets = append(septets, (src[count+3]&0x0F<<3)|(src[count+2]&0xE0>>5))
-				septets = append(septets, (src[count+4]&0x07<<4)|(src[count+3]&0xF0>>4))
-				count += 5
-			case remain >= 4:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				septets = append(septets, (src[count+1]&0x3F<<1)|(src[count+0]&0x80>>7))
-				septets = append(septets, (src[count+2]&0x1F<<2)|(src[count+1]&0xC0>>6))
-				septets = append(septets, (src[count+3]&0x0F<<3)|(src[count+2]&0xE0>>5))
-				count += 4
-			case remain >= 3:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				septets = append(septets, (src[count+1]&0x3F<<1)|(src[count+0]&0x80>>7))
-				septets = append(septets, (src[count+2]&0x1F<<2)|(src[count+1]&0xC0>>6))
-				count += 3
-			case remain >= 2:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				septets = append(septets, (src[count+1]&0x3F<<1)|(src[count+0]&0x80>>7))
-				count += 2
-			case remain >= 1:
-				septets = append(septets, src[count+0]&0x7F<<0)
-				count++
-			default:
-				return
-			}
-			remain = len(src) - count
-		}
-	}
-	return
+func (g *gsm7Decoder) Reset() {
+	*g = gsm7Decoder{packed: g.packed}
 }
 
 func (g *gsm7Decoder) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
-	if len(src) == 0 {
-		return 0, 0, nil
-	}
-
-	septets := unpack(src, g.packed)
-
-	nSeptet := 0
-	builder := bytes.NewBufferString("")
-	for nSeptet < len(septets) {
-		b := septets[nSeptet]
-		if b == escapeSequence {
-			nSeptet++
-			if nSeptet >= len(septets) {
-				return 0, 0, ErrInvalidByte
+	if !g.packed {
+		for nSrc < len(src) {
+			b := src[nSrc]
+			r, ok := decodeGSM7Rune(b, false)
+			size := 1
+			if b == escapeSequence {
+				if nSrc+1 == len(src) {
+					if !atEOF {
+						return nDst, nSrc, transform.ErrShortSrc
+					}
+					return nDst, nSrc, ErrInvalidByte
+				}
+				r, ok = decodeGSM7Rune(src[nSrc+1], true)
+				size = 2
 			}
-			e := septets[nSeptet]
-			if r, ok := reverseEscape[e]; ok {
-				builder.WriteRune(r)
-			} else {
-				return 0, 0, ErrInvalidByte
+			if !ok {
+				return nDst, nSrc, ErrInvalidByte
 			}
-		} else if r, ok := reverseLookup[b]; ok {
-			builder.WriteRune(r)
-		} else {
-			return 0, 0, ErrInvalidByte
+			if len(dst)-nDst < utf8.RuneLen(r) {
+				return nDst, nSrc, transform.ErrShortDst
+			}
+			nDst += utf8.EncodeRune(dst[nDst:], r)
+			nSrc += size
 		}
-		nSeptet++
+		return nDst, nSrc, nil
 	}
-	text := builder.Bytes()
-	nDst = len(text)
-
-	if len(dst) < nDst {
-		return 0, 0, transform.ErrShortDst
+	for {
+		if g.nBits < 7 {
+			if nSrc == len(src) {
+				if g.escape {
+					if !atEOF {
+						return nDst, nSrc, transform.ErrShortSrc
+					}
+					return nDst, nSrc, ErrInvalidByte
+				}
+				if atEOF {
+					g.bits = 0
+					g.nBits = 0
+					return nDst, nSrc, nil
+				}
+				if g.nBits != 0 {
+					return nDst, nSrc, transform.ErrShortSrc
+				}
+				return nDst, nSrc, nil
+			}
+			g.last = src[nSrc]
+			g.bits |= uint16(g.last) << g.nBits
+			g.nBits += 8
+			g.octets++
+			nSrc++
+		}
+		// With no septet count, recognize legacy zero and CR padding only at
+		// the end of a complete block. Bit zero still belongs to the seventh
+		// septet (TS 23.038 §6.1.2.1.1); compare the seven upper bits.
+		if g.nBits == 7 && g.octets%7 == 0 && nSrc == len(src) && !g.escape {
+			if !atEOF {
+				return nDst, nSrc, transform.ErrShortSrc
+			}
+			if g.last>>1 == 0 || g.last>>1 == 0x0d {
+				g.bits = 0
+				g.nBits = 0
+				return nDst, nSrc, nil
+			}
+		}
+		// TS 23.038 V19.0.0 §6.1.2.3.1 adds a second CR plus one zero
+		// bit after a wanted CR ending on an octet boundary. As with other
+		// inferred padding, two literal CRs at this boundary are ambiguous.
+		if g.nBits == 8 && g.octets%7 == 1 && nSrc == len(src) &&
+			!g.escape && g.lastSeptet == 0x0d && g.bits == 0x0d {
+			if !atEOF {
+				return nDst, nSrc, transform.ErrShortSrc
+			}
+			g.bits = 0
+			g.nBits = 0
+			return nDst, nSrc, nil
+		}
+		b := byte(g.bits & 0x7f)
+		if b == escapeSequence && !g.escape {
+			g.bits >>= 7
+			g.nBits -= 7
+			g.escape = true
+			continue
+		}
+		r, ok := decodeGSM7Rune(b, g.escape)
+		if !ok {
+			return nDst, nSrc, ErrInvalidByte
+		}
+		if len(dst)-nDst < utf8.RuneLen(r) {
+			return nDst, nSrc, transform.ErrShortDst
+		}
+		nDst += utf8.EncodeRune(dst[nDst:], r)
+		g.bits >>= 7
+		g.nBits -= 7
+		g.lastSeptet = b
+		g.escape = false
 	}
-
-	copy(dst, text)
-	return
 }
 
 type gsm7Encoder struct {
-	packed bool
+	packed     bool
+	bits       uint16
+	nBits      uint
+	lastSeptet byte
 }
 
 func (g *gsm7Encoder) Reset() {
-	/* no needed */
-}
-
-func pack(dst []byte, septets []byte) (nDst int) {
-	nSeptet := 0
-	for remain := len(septets); remain > 0; {
-		// Pack by converting septets into octets.
-		switch {
-		case remain >= 8:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = (septets[nSeptet+1] & 0x7E >> 1) | (septets[nSeptet+2] & 0x03 << 6)
-			dst[nDst+2] = (septets[nSeptet+2] & 0x7C >> 2) | (septets[nSeptet+3] & 0x07 << 5)
-			dst[nDst+3] = (septets[nSeptet+3] & 0x78 >> 3) | (septets[nSeptet+4] & 0x0F << 4)
-			dst[nDst+4] = (septets[nSeptet+4] & 0x70 >> 4) | (septets[nSeptet+5] & 0x1F << 3)
-			dst[nDst+5] = (septets[nSeptet+5] & 0x60 >> 5) | (septets[nSeptet+6] & 0x3F << 2)
-			dst[nDst+6] = (septets[nSeptet+6] & 0x40 >> 6) | (septets[nSeptet+7] & 0x7F << 1)
-			nSeptet += 8
-			nDst += 7
-		case remain >= 7:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = (septets[nSeptet+1] & 0x7E >> 1) | (septets[nSeptet+2] & 0x03 << 6)
-			dst[nDst+2] = (septets[nSeptet+2] & 0x7C >> 2) | (septets[nSeptet+3] & 0x07 << 5)
-			dst[nDst+3] = (septets[nSeptet+3] & 0x78 >> 3) | (septets[nSeptet+4] & 0x0F << 4)
-			dst[nDst+4] = (septets[nSeptet+4] & 0x70 >> 4) | (septets[nSeptet+5] & 0x1F << 3)
-			dst[nDst+5] = (septets[nSeptet+5] & 0x60 >> 5) | (septets[nSeptet+6] & 0x3F << 2)
-			dst[nDst+6] = septets[nSeptet+6] & 0x40 >> 6
-			nSeptet += 7
-			nDst += 7
-		case remain >= 6:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = (septets[nSeptet+1] & 0x7E >> 1) | (septets[nSeptet+2] & 0x03 << 6)
-			dst[nDst+2] = (septets[nSeptet+2] & 0x7C >> 2) | (septets[nSeptet+3] & 0x07 << 5)
-			dst[nDst+3] = (septets[nSeptet+3] & 0x78 >> 3) | (septets[nSeptet+4] & 0x0F << 4)
-			dst[nDst+4] = (septets[nSeptet+4] & 0x70 >> 4) | (septets[nSeptet+5] & 0x1F << 3)
-			dst[nDst+5] = septets[nSeptet+5] & 0x60 >> 5
-			nSeptet += 6
-			nDst += 6
-		case remain >= 5:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = (septets[nSeptet+1] & 0x7E >> 1) | (septets[nSeptet+2] & 0x03 << 6)
-			dst[nDst+2] = (septets[nSeptet+2] & 0x7C >> 2) | (septets[nSeptet+3] & 0x07 << 5)
-			dst[nDst+3] = (septets[nSeptet+3] & 0x78 >> 3) | (septets[nSeptet+4] & 0x0F << 4)
-			dst[nDst+4] = septets[nSeptet+4] & 0x70 >> 4
-			nSeptet += 5
-			nDst += 5
-		case remain >= 4:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = (septets[nSeptet+1] & 0x7E >> 1) | (septets[nSeptet+2] & 0x03 << 6)
-			dst[nDst+2] = (septets[nSeptet+2] & 0x7C >> 2) | (septets[nSeptet+3] & 0x07 << 5)
-			dst[nDst+3] = septets[nSeptet+3] & 0x78 >> 3
-			nSeptet += 4
-			nDst += 4
-		case remain >= 3:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = (septets[nSeptet+1] & 0x7E >> 1) | (septets[nSeptet+2] & 0x03 << 6)
-			dst[nDst+2] = septets[nSeptet+2] & 0x7C >> 2
-			nSeptet += 3
-			nDst += 3
-		case remain >= 2:
-			dst[nDst+0] = (septets[nSeptet+0] & 0x7F >> 0) | (septets[nSeptet+1] & 0x01 << 7)
-			dst[nDst+1] = septets[nSeptet+1] & 0x7E >> 1
-			nSeptet += 2
-			nDst += 2
-		case remain >= 1:
-			dst[nDst+0] = septets[nSeptet+0] & 0x7F >> 0
-			nSeptet++
-			nDst++
-		default:
-			return
-		}
-		remain = len(septets) - nSeptet
-	}
-	return
+	*g = gsm7Encoder{packed: g.packed}
 }
 
 func (g *gsm7Encoder) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
-	if len(src) == 0 {
-		return 0, 0, nil
-	}
-
-	text := string(src) // work with []rune (a.k.a string) instead of []byte
-	septets := make([]byte, 0, len(text))
-	for _, r := range text {
-		if v, ok := forwardLookup[r]; ok {
-			septets = append(septets, v)
-		} else if v, ok := forwardEscape[r]; ok {
-			septets = append(septets, escapeSequence, v)
-		} else {
-			return 0, 0, ErrInvalidCharacter
+	for nSrc < len(src) {
+		if !utf8.FullRune(src[nSrc:]) && !atEOF {
+			return nDst, nSrc, transform.ErrShortSrc
 		}
-		nSrc++
+		r, size := utf8.DecodeRune(src[nSrc:])
+		var septets [2]byte
+		count := 1
+		if v, ok := forwardLookup[r]; ok {
+			septets[0] = v
+		} else if v, ok := forwardEscape[r]; ok {
+			septets[0] = escapeSequence
+			septets[1] = v
+			count = 2
+		} else {
+			return nDst, nSrc, ErrInvalidCharacter
+		}
+		needed := count
+		if g.packed {
+			needed = int((g.nBits + uint(count)*7) / 8)
+		}
+		if len(dst)-nDst < needed {
+			return nDst, nSrc, transform.ErrShortDst
+		}
+		for _, b := range septets[:count] {
+			if !g.packed {
+				dst[nDst] = b
+				nDst++
+				continue
+			}
+			g.bits |= uint16(b) << g.nBits
+			g.lastSeptet = b
+			g.nBits += 7
+			if g.nBits >= 8 {
+				dst[nDst] = byte(g.bits)
+				nDst++
+				g.bits >>= 8
+				g.nBits -= 8
+			}
+		}
+		nSrc += size
 	}
+	if g.packed && atEOF && g.nBits == 0 && g.lastSeptet == 0x0d {
+		if nDst == len(dst) {
+			return nDst, nSrc, transform.ErrShortDst
+		}
+		// TS 23.038 V19.0.0 §6.1.2.3.1: preserve a wanted CR ending on
+		// an octet boundary by appending another CR and one zero bit.
+		dst[nDst] = 0x0d
+		nDst++
+		g.lastSeptet = 0
+	}
+	if g.packed && atEOF && g.nBits != 0 {
+		if nDst == len(dst) {
+			return nDst, nSrc, transform.ErrShortDst
+		}
+		// Preserve the package's CR-padding convention when seven spare
+		// bits would otherwise be decoded as @. TS 23.038 §6.1.2.3.1
+		// prescribes this convention for USSD; SMS §6.1.2.1.1 uses zeros.
+		if g.nBits == 1 {
+			g.bits |= 0x0d << 1
+		}
+		dst[nDst] = byte(g.bits)
+		nDst++
+		g.bits = 0
+		g.nBits = 0
+		g.lastSeptet = 0
+	}
+	return nDst, nSrc, nil
+}
 
-	nDst = len(septets)
-	if g.packed {
-		nDst = int(math.Ceil(float64(len(septets)) * 7 / 8))
+// DecodeGSM7Packed decodes packed GSM 7-bit data after fillBits alignment bits.
+// fillBits must be in 0..6, as used to align a UDH (TS 23.040 §9.2.3.24).
+// A nonnegative septetCount selects exactly that many septets, preserving
+// literal final @ and CR characters. A count of -1 infers the count and accepts
+// zero or CR padding. Without a count, a terminal @ or CR occupying a complete
+// padding septet is ambiguous. A duplicated CR after an octet boundary is also
+// indistinguishable from two literal CRs straddling that boundary.
+func DecodeGSM7Packed(src []byte, fillBits uint8, septetCount int) (string, error) {
+	if fillBits > 6 || septetCount < -1 {
+		return "", ErrInvalidByte
 	}
-	if len(dst) < nDst {
-		return 0, 0, transform.ErrShortDst
+	if len(src) == 0 {
+		if septetCount > 0 {
+			return "", ErrInvalidByte
+		}
+		return "", nil
 	}
+	// TS 23.040 V19.0.0 §9.2.3.24 inserts fill bits for alignment, not
+	// as user text. Skip their values rather than rejecting received data.
+	availableBits := len(src)*8 - int(fillBits)
+	availableSeptets := availableBits / 7
+	count := septetCount
+	if count == -1 {
+		count = availableSeptets
+	}
+	if count > availableSeptets {
+		return "", ErrInvalidByte
+	}
+	septets := make([]byte, count)
+	// TS 23.038 §6.1.2.1.1 packs the least significant bit first.
+	for i := range septets {
+		bit := int(fillBits) + i*7
+		offset, shift := bit/8, uint(bit%8)
+		value := uint16(src[offset]) >> shift
+		if offset+1 < len(src) {
+			value |= uint16(src[offset+1]) << (8 - shift)
+		}
+		septets[i] = byte(value & 0x7f)
+	}
+	if septetCount == -1 && count > 0 {
+		escaped := false
+		for _, b := range septets[:count-1] {
+			escaped = !escaped && b == escapeSequence
+		}
+		last := septets[count-1]
+		// TS 23.038 §6.2.1.1: an extension's fallback septet remains
+		// content even when its value would otherwise denote padding.
+		fullPadding := availableBits%7 == 0 && (last == 0 || last == 0x0d)
+		duplicateCR := count > 1 && last == 0x0d && septets[count-2] == 0x0d &&
+			(int(fillBits)+(count-1)*7)%8 == 0 && availableBits%7 == 1
+		if !escaped && (fullPadding || duplicateCR) {
+			septets = septets[:count-1]
+		}
+	}
+	return GSM7BIT.Decode(septets)
+}
 
-	if !g.packed {
-		copy(dst, septets)
-		return nDst, nSrc, nil
+func decodeGSM7Rune(b byte, escaped bool) (rune, bool) {
+	if escaped {
+		if r, ok := reverseEscape[b]; ok {
+			return r, true
+		}
+		// TS 23.038 §6.2.1.1: unassigned extensions use the main table;
+		// its reserved escape-to-another-extension entry displays a space.
+		if b == escapeSequence {
+			return ' ', true
+		}
 	}
-
-	nDst = pack(dst, septets)
-	return
+	r, ok := reverseLookup[b]
+	return r, ok
 }

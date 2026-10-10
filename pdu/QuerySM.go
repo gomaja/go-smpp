@@ -35,6 +35,7 @@ func (c *QuerySM) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.8.1 Table 4-22: C-Octet maxima include NUL.
 func (c *QuerySM) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.MessageID) + 1)
@@ -48,7 +49,7 @@ func (c *QuerySM) Marshal(b *ByteBuffer) {
 func (c *QuerySM) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.MessageID, err = b.ReadCString(); err == nil {
-			err = c.SourceAddr.Unmarshal(b)
+			err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR)
 		}
 		return
 	})

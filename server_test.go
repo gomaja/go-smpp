@@ -296,9 +296,9 @@ func TestServerBindRejectsNonBindFirstPDUWithStructuredError(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
-	el := pdu.NewEnquireLink()
+	request := pdu.NewUnbind()
 	buf := pdu.NewBuffer(nil)
-	el.Marshal(buf)
+	request.Marshal(buf)
 
 	require.NoError(t, conn.SetDeadline(time.Now().Add(testBindWait)))
 	_, err = conn.Write(buf.Bytes())

@@ -182,29 +182,42 @@ func TestServerWriteFailureReportedOnceTCP(t *testing.T) {
 	trx := testServerTransceiver(t, srv)
 	// Keep the peer open without reading, filling the socket buffers until a
 	// real write timeout closes the session and interrupts its TCP reader.
-	for range 20000 {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for trx.isAlive() {
 		d := pdu.NewDeliverSM().(*pdu.DeliverSM)
 		if err := d.Message.SetMessageWithEncoding(strings.Repeat("x", 150), data.ASCII); err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		err := srv.SubmitToSystemID(ctx, "sys", d)
-		cancel()
 		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("socket did not reach a write timeout before the overall deadline: %v", err)
+			}
 			break
 		}
 	}
 	awaitServerIOExit(t, srv, trx)
-	if len(errs) != 1 {
-		var reported []error
-		for len(errs) > 0 {
-			reported = append(reported, <-errs)
+	var timeouts int
+	seen := make(map[int32]bool)
+	for len(errs) > 0 {
+		err := <-errs
+		var submit *SubmitError
+		if !errors.As(err, &submit) || submit.PDU == nil || seen[submit.PDU.GetSequenceNumber()] {
+			t.Fatalf("missing or repeated failed PDU: %v", err)
 		}
-		t.Fatalf("one TCP write timeout reported %d errors: %v", len(reported), reported)
+		seen[submit.PDU.GetSequenceNumber()] = true
+		if errors.Is(err, ErrConnectionClosing) {
+			continue
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() || !strings.Contains(err.Error(), "write tcp") {
+			t.Fatalf("expected TCP write timeout: %v", err)
+		}
+		timeouts++
 	}
-	var netErr net.Error
-	if err := <-errs; !errors.As(err, &netErr) || !netErr.Timeout() || !strings.Contains(err.Error(), "write tcp") {
-		t.Fatalf("expected TCP write timeout: %v", err)
+	if timeouts != 1 {
+		t.Fatalf("TCP write timeouts reported %d times, want 1", timeouts)
 	}
 }
 
@@ -220,8 +233,7 @@ func testServerTransceiver(t *testing.T, srv *Server) *transceivable {
 	return nil
 }
 
-// awaitServerIOExit waits for both daemon callbacks, including those that can
-// outlive the connection cleanup because the underlying close is asynchronous.
+// awaitServerIOExit verifies transport shutdown and completion of both workers.
 func awaitServerIOExit(t *testing.T, srv *Server, trx *transceivable) {
 	t.Helper()
 	await(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return len(srv.connections) == 0 })

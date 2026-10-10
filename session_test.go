@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-smpp/pdu"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,90 +26,49 @@ func TestInvalidSessionSettings(t *testing.T) {
 }
 
 func TestGetWindowSize(t *testing.T) {
-
-	auth := nextAuth()
-
-	s, err := NewSession(
-		TXConnector(NonTLSDialer, auth),
-		Settings{
-			EnquireLink: 5 * time.Second,
-			ReadTimeout: 10 * time.Second,
-			WindowedRequestTracking: &WindowedRequestTracking{
-				OnReceivedPduRequest: handleReceivedPduRequest(t),
-				MaxWindowSize:        10,
-				StoreAccessTimeOut:   100 * time.Millisecond,
-			},
-		}, 2*time.Second)
-	require.Nil(t, err)
-	size, err := s.GetWindowSize()
-	if err != nil {
-		return
-	}
-	require.Nil(t, err)
-	require.Equal(t, 0, size)
-	err = s.Close()
-	require.Nil(t, err)
-
-	s, err = NewSession(
-		RXConnector(NonTLSDialer, auth),
-		Settings{
-			EnquireLink: 5 * time.Second,
-			ReadTimeout: 10 * time.Second,
-			WindowedRequestTracking: &WindowedRequestTracking{
-				OnReceivedPduRequest: handleReceivedPduRequest(t),
-				MaxWindowSize:        10,
-				StoreAccessTimeOut:   100 * time.Millisecond,
-			},
-		}, 2*time.Second)
-	require.Nil(t, err)
-	size, err = s.GetWindowSize()
-	if err != nil {
-		return
-	}
-	require.Nil(t, err)
-	require.Equal(t, -1, size)
-	err = s.Close()
-	require.Nil(t, err)
-
-	s, err = NewSession(
-		TRXConnector(NonTLSDialer, auth),
-		Settings{
-			EnquireLink: 5 * time.Second,
-			ReadTimeout: 10 * time.Second,
-			WindowedRequestTracking: &WindowedRequestTracking{
+	for _, tc := range []struct {
+		name    string
+		bind    pdu.BindingType
+		expire  bool
+		wantErr error
+	}{
+		{name: "TX", bind: pdu.Transmitter},
+		{name: "RX", bind: pdu.Receiver, wantErr: ErrWindowSizeNotAvailableOnReceiverBinds},
+		{name: "TRX", bind: pdu.Transceiver},
+		{name: "TRX with expiry", bind: pdu.Transceiver, expire: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window := &WindowedRequestTracking{
 				MaxWindowSize:      10,
-				StoreAccessTimeOut: 100 * time.Millisecond,
-			},
-		}, 2*time.Second)
-	require.NoError(t, err)
-	size, err = s.GetWindowSize()
-	if err != nil {
-		return
-	}
-	require.Nil(t, err)
-	require.Equal(t, 0, size)
-	err = s.Close()
-	require.Nil(t, err)
+				StoreAccessTimeOut: time.Second,
+			}
+			if tc.expire {
+				window.ExpireCheckTimer = 5 * time.Second
+				window.PduExpireTimeOut = 10 * time.Second
+			}
+			var c Connector
+			switch tc.bind {
+			case pdu.Transmitter:
+				c = TXConnector(NonTLSDialer, nextAuth())
+			case pdu.Receiver:
+				c = RXConnector(NonTLSDialer, nextAuth())
+			case pdu.Transceiver:
+				c = TRXConnector(NonTLSDialer, nextAuth())
+			}
+			s, err := NewSession(c, Settings{
+				ReadTimeout:             time.Minute,
+				WindowedRequestTracking: window,
+			}, 0)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, s.Close()) })
 
-	s, err = NewSession(
-		TRXConnector(NonTLSDialer, auth),
-		Settings{
-			EnquireLink: 5 * time.Second,
-			ReadTimeout: 10 * time.Second,
-			WindowedRequestTracking: &WindowedRequestTracking{
-				ExpireCheckTimer:   5,
-				PduExpireTimeOut:   10,
-				MaxWindowSize:      10,
-				StoreAccessTimeOut: 100 * time.Millisecond,
-			},
-		}, 2*time.Second)
-	require.NoError(t, err)
-	size, err = s.GetWindowSize()
-	if err != nil {
-		return
+			size, err := s.GetWindowSize()
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, size)
+		})
 	}
-	require.Nil(t, err)
-	require.Equal(t, -1, size)
-	err = s.Close()
-	require.Nil(t, err)
 }

@@ -82,6 +82,8 @@ func transceivableHandleAllPDU(t *testing.T) func(pdu.PDU) (pdu.PDU, bool) {
 }
 
 func TestTRXSubmitSM(t *testing.T) {
+	baseline := atomic.LoadInt32(&countSubmitSMResp)
+	responses := newTRXTestResponses()
 	auth := nextAuth()
 	trans, err := NewSession(
 		TRXConnector(NonTLSDialer, auth),
@@ -104,7 +106,10 @@ func TestTRXSubmitSM(t *testing.T) {
 				t.Log(err)
 			},
 
-			OnPDU: handlePDU(t),
+			OnPDU: func(p pdu.PDU, responded bool) {
+				handlePDU(t)(p, responded)
+				responses.received(p)
+			},
 
 			OnClosed: func(state State) {
 				t.Log(state)
@@ -118,27 +123,25 @@ func TestTRXSubmitSM(t *testing.T) {
 
 	require.Equal(t, testSMSCSystemID, trans.Transceiver().SystemID())
 
-	// sending 20 SMS
 	for i := 0; i < 20; i++ {
-		err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-		require.Nil(t, err)
-		time.Sleep(50 * time.Millisecond)
+		request := newSubmitSM(auth.SystemID)
+		require.NoError(t, trans.Transceiver().Submit(request))
+		responses.waitSubmit(t, request.GetSequenceNumber())
 	}
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 20)
+	responses.waitEnquireLink(t)
 
-	time.Sleep(5 * time.Second)
-
-	// wait response received
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 15)
-
-	// rebind and submit again
+	// Rebinding must restart both directions before accepting another request.
 	trans.rebind()
-	err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-	require.Nil(t, err)
-	time.Sleep(time.Second)
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 16)
+	request := newSubmitSM(auth.SystemID)
+	require.NoError(t, trans.Transceiver().Submit(request))
+	responses.waitSubmit(t, request.GetSequenceNumber())
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 21)
 }
 
 func TestTRXSubmitSM_with_OnAllPDU(t *testing.T) {
+	baseline := atomic.LoadInt32(&countSubmitSMResp)
+	responses := newTRXTestResponses()
 	auth := nextAuth()
 	trans, err := NewSession(
 		TRXConnector(NonTLSDialer, auth),
@@ -161,7 +164,11 @@ func TestTRXSubmitSM_with_OnAllPDU(t *testing.T) {
 				t.Log(err)
 			},
 
-			OnAllPDU: transceivableHandleAllPDU(t),
+			OnAllPDU: func(p pdu.PDU) (pdu.PDU, bool) {
+				response, closeBind := transceivableHandleAllPDU(t)(p)
+				responses.received(p)
+				return response, closeBind
+			},
 
 			OnClosed: func(state State) {
 				t.Log(state)
@@ -175,24 +182,60 @@ func TestTRXSubmitSM_with_OnAllPDU(t *testing.T) {
 
 	require.Equal(t, testSMSCSystemID, trans.Transceiver().SystemID())
 
-	// sending 20 SMS
 	for i := 0; i < 20; i++ {
-		err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-		require.Nil(t, err)
-		time.Sleep(50 * time.Millisecond)
+		request := newSubmitSM(auth.SystemID)
+		require.NoError(t, trans.Transceiver().Submit(request))
+		responses.waitSubmit(t, request.GetSequenceNumber())
 	}
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 20)
+	responses.waitEnquireLink(t)
 
-	time.Sleep(5 * time.Second)
-
-	// wait response received
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 15)
-
-	// rebind and submit again
+	// Rebinding must restart both directions before accepting another request.
 	trans.rebind()
-	err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-	require.Nil(t, err)
-	time.Sleep(time.Second)
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 16)
+	request := newSubmitSM(auth.SystemID)
+	require.NoError(t, trans.Transceiver().Submit(request))
+	responses.waitSubmit(t, request.GetSequenceNumber())
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 21)
+}
+
+type trxTestResponses struct {
+	submit      chan int32
+	enquireLink chan struct{}
+}
+
+func newTRXTestResponses() *trxTestResponses {
+	return &trxTestResponses{submit: make(chan int32, 1), enquireLink: make(chan struct{}, 1)}
+}
+
+func (responses *trxTestResponses) received(p pdu.PDU) {
+	switch p.(type) {
+	case *pdu.SubmitSMResp:
+		responses.submit <- p.GetSequenceNumber()
+	case *pdu.EnquireLinkResp:
+		select {
+		case responses.enquireLink <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (responses *trxTestResponses) waitSubmit(t *testing.T, sequence int32) {
+	t.Helper()
+	select {
+	case got := <-responses.submit:
+		require.Equal(t, sequence, got, "response must complete this test's request")
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no submit_sm_resp for sequence %d", sequence)
+	}
+}
+
+func (responses *trxTestResponses) waitEnquireLink(t *testing.T) {
+	t.Helper()
+	select {
+	case <-responses.enquireLink:
+	case <-time.After(3 * time.Second):
+		t.Fatal("keep-alive did not receive enquire_link_resp")
+	}
 }
 
 func newSubmitSM(systemID string) *pdu.SubmitSM {
@@ -220,6 +263,8 @@ func newSubmitSM(systemID string) *pdu.SubmitSM {
 }
 
 func TestTRXSubmitSM_with_WindowConfig(t *testing.T) {
+	baseline := atomic.LoadInt32(&countSubmitSMResp)
+	responses := newTRXTestResponses()
 	auth := nextAuth()
 	trans, err := NewSession(
 		TRXConnector(NonTLSDialer, auth),
@@ -243,14 +288,23 @@ func TestTRXSubmitSM_with_WindowConfig(t *testing.T) {
 			},
 
 			WindowedRequestTracking: &WindowedRequestTracking{
-				OnReceivedPduRequest:  handleReceivedPduRequest(t),
-				OnExpectedPduResponse: handleExpectedPduResponse(t),
-				OnExpiredPduRequest:   nil,
-				PduExpireTimeOut:      30 * time.Second,
-				ExpireCheckTimer:      10 * time.Second,
-				MaxWindowSize:         30,
-				EnableAutoRespond:     false,
-				StoreAccessTimeOut:    100 * time.Millisecond,
+				OnReceivedPduRequest: handleReceivedPduRequest(t),
+				OnExpectedPduResponse: func(response Response) {
+					handleExpectedPduResponse(t)(response)
+					responses.received(response.PDU)
+				},
+				OnUnexpectedPduResponse: func(response pdu.PDU) {
+					// Automatic keepalives bypass the store and have no window entry.
+					if _, enquiry := response.(*pdu.EnquireLinkResp); enquiry {
+						responses.received(response)
+					}
+				},
+				OnExpiredPduRequest: nil,
+				PduExpireTimeOut:    30 * time.Second,
+				ExpireCheckTimer:    10 * time.Second,
+				MaxWindowSize:       30,
+				EnableAutoRespond:   false,
+				StoreAccessTimeOut:  100 * time.Millisecond,
 			},
 
 			OnClosed: func(state State) {
@@ -265,27 +319,25 @@ func TestTRXSubmitSM_with_WindowConfig(t *testing.T) {
 
 	require.Equal(t, testSMSCSystemID, trans.Transceiver().SystemID())
 
-	// sending 20 SMS
 	for i := 0; i < 50; i++ {
-		err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-		require.Nil(t, err)
-		time.Sleep(50 * time.Millisecond)
+		request := newSubmitSM(auth.SystemID)
+		require.NoError(t, trans.Transceiver().Submit(request))
+		responses.waitSubmit(t, request.GetSequenceNumber())
 	}
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 50)
+	responses.waitEnquireLink(t)
 
-	time.Sleep(5 * time.Second)
-
-	// wait response received
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 15)
-
-	// rebind and submit again
+	// Rebinding must restart both directions before accepting another request.
 	trans.rebind()
-	err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-	require.Nil(t, err)
-	time.Sleep(time.Second)
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 16)
+	request := newSubmitSM(auth.SystemID)
+	require.NoError(t, trans.Transceiver().Submit(request))
+	responses.waitSubmit(t, request.GetSequenceNumber())
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 51)
 }
 
 func TestTRXSubmitSM_with_WindowConfig_and_AutoRespond(t *testing.T) {
+	baseline := atomic.LoadInt32(&countSubmitSMResp)
+	responses := newTRXTestResponses()
 	auth := nextAuth()
 	trans, err := NewSession(
 		TRXConnector(NonTLSDialer, auth),
@@ -309,14 +361,23 @@ func TestTRXSubmitSM_with_WindowConfig_and_AutoRespond(t *testing.T) {
 			},
 
 			WindowedRequestTracking: &WindowedRequestTracking{
-				OnReceivedPduRequest:  handleReceivedPduRequest(t),
-				OnExpectedPduResponse: handleExpectedPduResponse(t),
-				OnExpiredPduRequest:   nil,
-				PduExpireTimeOut:      30 * time.Second,
-				ExpireCheckTimer:      10 * time.Second,
-				MaxWindowSize:         30,
-				EnableAutoRespond:     true,
-				StoreAccessTimeOut:    100 * time.Millisecond,
+				OnReceivedPduRequest: handleReceivedPduRequest(t),
+				OnExpectedPduResponse: func(response Response) {
+					handleExpectedPduResponse(t)(response)
+					responses.received(response.PDU)
+				},
+				OnUnexpectedPduResponse: func(response pdu.PDU) {
+					// Automatic keepalives bypass the store and have no window entry.
+					if _, enquiry := response.(*pdu.EnquireLinkResp); enquiry {
+						responses.received(response)
+					}
+				},
+				OnExpiredPduRequest: nil,
+				PduExpireTimeOut:    30 * time.Second,
+				ExpireCheckTimer:    10 * time.Second,
+				MaxWindowSize:       30,
+				EnableAutoRespond:   true,
+				StoreAccessTimeOut:  100 * time.Millisecond,
 			},
 
 			OnClosed: func(state State) {
@@ -331,24 +392,20 @@ func TestTRXSubmitSM_with_WindowConfig_and_AutoRespond(t *testing.T) {
 
 	require.Equal(t, testSMSCSystemID, trans.Transceiver().SystemID())
 
-	// sending 20 SMS
 	for i := 0; i < 20; i++ {
-		err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-		require.Nil(t, err)
-		time.Sleep(50 * time.Millisecond)
+		request := newSubmitSM(auth.SystemID)
+		require.NoError(t, trans.Transceiver().Submit(request))
+		responses.waitSubmit(t, request.GetSequenceNumber())
 	}
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 20)
+	responses.waitEnquireLink(t)
 
-	time.Sleep(5 * time.Second)
-
-	// wait response received
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 15)
-
-	// rebind and submit again
+	// Rebinding must restart both directions before accepting another request.
 	trans.rebind()
-	err = trans.Transceiver().Submit(newSubmitSM(auth.SystemID))
-	require.Nil(t, err)
-	time.Sleep(time.Second)
-	require.True(t, atomic.LoadInt32(&countSubmitSMResp) >= 16)
+	request := newSubmitSM(auth.SystemID)
+	require.NoError(t, trans.Transceiver().Submit(request))
+	responses.waitSubmit(t, request.GetSequenceNumber())
+	require.True(t, atomic.LoadInt32(&countSubmitSMResp)-baseline >= 21)
 }
 
 func handleReceivedPduRequest(t *testing.T) func(pdu.PDU) (pdu.PDU, bool) {

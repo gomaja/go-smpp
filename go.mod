@@ -8,7 +8,6 @@ retract [v1.0.0, v1.0.1] // Tagged releases are withdrawn; depend on the main br
 
 require (
 	github.com/allegro/bigcache/v3 v3.2.0
-	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/text v0.43.0
 )

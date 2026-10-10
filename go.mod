@@ -2,6 +2,10 @@ module github.com/gomaja/go-smpp
 
 go 1.24.0
 
+// v1.0.1 exists only to carry this directive, so it retracts itself too.
+
+retract [v1.0.0, v1.0.1] // Tagged releases are withdrawn; depend on the main branch.
+
 require (
 	github.com/allegro/bigcache/v3 v3.1.0
 	github.com/orcaman/concurrent-map/v2 v2.0.1

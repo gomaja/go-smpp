@@ -30,10 +30,9 @@ type Receiver interface {
 // Settings for TX (transmitter), RX (receiver), TRX (transceiver).
 type Settings struct {
 	// ReadTimeout is timeout for reading PDU from SMSC.
-	// Underlying net.Conn will be stricted with ReadDeadline(now + timeout).
-	// This setting is very important to detect connection failure.
-	//
-	// Must: ReadTimeout > max(0, EnquireLink)
+	// A non-positive value clears the underlying read deadline.
+	// NewSession requires ReadTimeout > max(0, EnquireLink) to detect
+	// connection failure; server accounts may disable the deadline.
 	ReadTimeout time.Duration
 
 	// WriteTimeout is timeout for submitting PDU.

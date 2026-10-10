@@ -150,6 +150,11 @@ func (t *transceivable) Submit(p pdu.PDU) error {
 	return t.out.Submit(p)
 }
 
+// SubmitContext queues a PDU, allowing cancellation while waiting for capacity.
+func (t *transceivable) SubmitContext(ctx context.Context, p pdu.PDU) error {
+	return t.out.SubmitContext(ctx, p)
+}
+
 func (t *transceivable) GetWindowSize() (int, error) {
 	if t.settings.WindowedRequestTracking != nil {
 		ctx, cancelFunc := context.WithTimeout(context.Background(), t.settings.StoreAccessTimeOut)

@@ -64,3 +64,68 @@ escape accounting, UDH parsing mistakes, non-idempotent close paths, request
 window races, dropped non-OK responses, optional-parameter gaps, and malformed
 PDU parser crashes. Fixes in this repository should keep those classes covered
 by focused unit, race, and fuzz tests before changing protocol behavior.
+
+## SMSC server
+
+Server behavior follows the supplied SMPP v3.4 Issue 1.2 text, including its
+incorporated erratum SMPPV3.4-05Oct99-01: bind_transceiver carries the mandatory
+`interface_version` field (§4.1.5). SMPP v5 remains a separate future protocol
+boundary; its §3.2.1.3 also clarifies the header-only error-response convention.
+
+- Bind responses echo request sequence numbers and identify the SMSC, using a
+  maximum 16-octet C-string including the terminator (§§4.1.2, 4.1.4, 4.1.6;
+  Tables 4-2, 4-4, 4-6). Failed binds omit the body, with `command_length = 16`.
+- Successful binds advertise `sc_interface_version` (tag `0x0210`, value
+  `0x34`) only when the ESME's `interface_version` is at least `0x34`
+  (§3.4, §5.2.4, §5.3.2.25). Server delivery carrying optional parameters selects
+  a compatible RX/TRX session or returns `UnsupportedOptionalParametersError` without sending.
+  Application responses omit optional parameters for older peers and report
+  the removal through `OnError`; caller PDUs retain their fields.
+- `BindResp.Marshal` and `SubmitSMResp.Marshal` omit error bodies when no TLVs
+  are explicitly registered (§§4.1.2, 4.1.4, 4.1.6, §4.4.2). Explicit error
+  TLVs retain mandatory-field framing for parsing, including diagnostic
+  `additional_status_info_text` (v3.4 §5.3.2.11; v5 §4.8.4.1). Decoders accept
+  header-only errors and the legacy body form.
+- Bound sessions always answer enquire_link (§4.11) and unbind (§4.2), echoing
+  the request sequence number (§5.1.4). Unbind responses are written before
+  closing. A repeated bind receives the matching bind response with
+  `ESME_RALYBND` (§5.1.3). Application handlers cannot override housekeeping.
+- Server-originated delivery selects only live RX or TRX sessions (§2.2,
+  §4.6). Account binding allow-lists may include TX, RX and TRX. Inbound PDUs
+  follow the ESME-issued column of §2.3 Table 2-1 before the handler is called:
+  submit_sm, submit_multi, query_sm, cancel_sm, replace_sm and data_sm require
+  TX/TRX; deliver_sm_resp and data_sm_resp require RX/TRX. For data_sm and its
+  response, §§2.5–2.6 clarify the message direction despite the broader entries
+  in the v3.4 table; v5 §2.4 Table 2-1 confirms these restrictions. For
+  replace_sm, §2.7 explicitly permits TRX despite its omission in Table 2-1;
+  v5 §2.4 confirms TX/TRX. Disallowed requests
+  receive the matching response with `ESME_RINVBNDSTS` (§5.1.3) and a 16-octet
+  header; disallowed responses are dropped. Header-only error responses also
+  follow v5 §3.2.1.3. Handlers receive `ServerSessionInfo` and remain responsible
+  for message processing and validating request fields.
+- Account admission, reservations and session registration share one lock.
+  Reservations retain their original account object until cleanup, including
+  account removal and replacement. A session is visible only after the bind
+  response has been written and its transceivable has started. The slot count
+  includes handshakes with reservations until their goroutines exit.
+- Non-positive read and write timeouts disable deadlines. A positive read
+  timeout must exceed the configured server keep-alive interval. The bind
+  deadline is cleared before bound I/O starts. Stop closes the listener and
+  all handshaking and bound connections and waits for server connection
+  cleanup. Existing asynchronous I/O closure can allow an already-running
+  handler to outlive Stop/StopSystemID; lifecycle hardening remains separate.
+- `SubmitToSystemID(ctx, systemID, p)` honours cancellation while waiting for
+  queue capacity. Success means queued, not delivered; the application must
+  track deliver_sm_resp (§4.6.2). A receipt submitted inside OnPDU can precede
+  the submit_sm_resp for the message being handled, because the outbound daemon
+  runs concurrently with the handler. Applications must coordinate ordering.
+- OnError and ServerPDUHandler callbacks must not call Stop synchronously;
+  request shutdown from a separate goroutine to avoid waiting on themselves.
+  Intentional Stop/StopSystemID/unbind transport errors are not reported.
+
+The server advertises v3.4, including when a peer requests a later version;
+it does not implement v5-only PDUs. For pre-v3.4 peers, application code must
+also keep generated message IDs within eight octets (§3.4).
+
+Optional TLS is delegated to Go's `crypto/tls` with the caller's configuration.
+No independent TLS protocol implementation or TLS conformance claim is made.

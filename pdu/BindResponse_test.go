@@ -102,7 +102,11 @@ func TestBindResponseRoundTrip(t *testing.T) {
 
 					resp, ok := p.(*BindResp)
 					require.True(t, ok)
-					require.Equal(t, systemID.value, resp.SystemID)
+					if status.value == data.ESME_ROK {
+						require.Equal(t, systemID.value, resp.SystemID)
+					} else {
+						require.Empty(t, resp.SystemID)
+					}
 					require.Equal(t, status.value, resp.CommandStatus)
 				})
 			}

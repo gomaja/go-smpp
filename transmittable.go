@@ -116,15 +116,27 @@ func (t *transmittable) closing(state State) {
 
 // Submit a PDU.
 func (t *transmittable) Submit(p pdu.PDU) (err error) {
+	return t.SubmitContext(context.Background(), p)
+}
+
+// SubmitContext queues a PDU, allowing cancellation while waiting for capacity.
+func (t *transmittable) SubmitContext(ctx context.Context, p pdu.PDU) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	atomic.AddInt32(&t.pendingWrite, 1)
+	defer atomic.AddInt32(&t.pendingWrite, -1)
 
 	if atomic.LoadInt32(&t.aliveState) == Alive {
-		t.input <- p
+		select {
+		case t.input <- p:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 	} else {
 		err = ErrConnectionClosing
 	}
 
-	atomic.AddInt32(&t.pendingWrite, -1)
 	return
 }
 
@@ -242,12 +254,6 @@ func (t *transmittable) check(p pdu.PDU, n int, err error) (closing bool) {
 
 // low level writing
 func (t *transmittable) write(p pdu.PDU) (n int, err error) {
-	if t.settings.WriteTimeout > 0 {
-		err = t.conn.SetWriteTimeout(t.settings.WriteTimeout)
-	}
-	if err != nil {
-		return
-	}
 
 	if t.settings.WindowedRequestTracking != nil && t.settings.MaxWindowSize > 0 && isAllowPDU(p) {
 		ctx, cancelFunc := context.WithTimeout(context.Background(), t.settings.StoreAccessTimeOut)
@@ -258,7 +264,7 @@ func (t *transmittable) write(p pdu.PDU) (n int, err error) {
 			return 0, err
 		}
 		if length < int(t.settings.MaxWindowSize) {
-			n, err = t.conn.WritePDU(p)
+			n, err = t.conn.writePDUWithTimeout(p, t.settings.WriteTimeout)
 			if err != nil {
 				return 0, err
 			}
@@ -274,7 +280,7 @@ func (t *transmittable) write(p pdu.PDU) (n int, err error) {
 			return 0, ErrWindowsFull
 		}
 	} else {
-		n, err = t.conn.WritePDU(p)
+		n, err = t.conn.writePDUWithTimeout(p, t.settings.WriteTimeout)
 	}
 
 	return

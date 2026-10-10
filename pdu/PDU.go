@@ -63,6 +63,13 @@ func (c *base) ensureOptionalParameters() {
 	}
 }
 
+// GetOptionalParameters returns the PDU's optional fields. The returned map
+// belongs to the PDU; callers must synchronize any access or modification.
+func (c *base) GetOptionalParameters() map[Tag]Field { return c.OptionalParameters }
+
+// SetCommandStatus sets the response status code.
+func (c *base) SetCommandStatus(status data.CommandStatusType) { c.CommandStatus = status }
+
 // GetHeader returns pdu header.
 func (c *base) GetHeader() Header {
 	return c.Header

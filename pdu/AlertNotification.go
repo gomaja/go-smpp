@@ -33,6 +33,7 @@ func (a *AlertNotification) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.12.1 Table 4-30 allows 65-octet address fields.
 func (a *AlertNotification) Marshal(b *ByteBuffer) {
 	a.base.marshal(b, func(b *ByteBuffer) {
 		a.SourceAddr.Marshal(b)
@@ -43,8 +44,8 @@ func (a *AlertNotification) Marshal(b *ByteBuffer) {
 // Unmarshal implements PDU interface.
 func (a *AlertNotification) Unmarshal(b *ByteBuffer) error {
 	return a.base.unmarshal(b, func(b *ByteBuffer) (err error) {
-		if err = a.SourceAddr.Unmarshal(b); err == nil {
-			err = a.EsmeAddr.Unmarshal(b)
+		if err = a.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
+			err = a.EsmeAddr.unmarshal(b, data.ESME_RINVDSTADR)
 		}
 		return
 	})

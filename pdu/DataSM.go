@@ -42,6 +42,7 @@ func (c *DataSM) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.7.1 Table 4-20 allows 65-octet address fields.
 func (c *DataSM) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.ServiceType) + 4)
@@ -59,8 +60,8 @@ func (c *DataSM) Marshal(b *ByteBuffer) {
 func (c *DataSM) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.ServiceType, err = b.ReadCString(); err == nil {
-			if err = c.SourceAddr.Unmarshal(b); err == nil {
-				if err = c.DestAddr.Unmarshal(b); err == nil {
+			if err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
+				if err = c.DestAddr.unmarshal(b, data.ESME_RINVDSTADR); err == nil {
 					if c.EsmClass, err = b.ReadByte(); err == nil {
 						if c.RegisteredDelivery, err = b.ReadByte(); err == nil {
 							c.DataCoding, err = b.ReadByte()

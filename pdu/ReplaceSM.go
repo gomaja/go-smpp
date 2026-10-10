@@ -21,7 +21,6 @@ type ReplaceSM struct {
 // NewReplaceSM returns ReplaceSM PDU.
 func NewReplaceSM() PDU {
 	message, _ := NewShortMessage("")
-	message.withoutDataCoding = true
 	c := &ReplaceSM{
 		base:                 newBase(),
 		SourceAddr:           NewAddress(),
@@ -45,6 +44,7 @@ func (c *ReplaceSM) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.10.1 Table 4-26: C-Octet maxima include NUL.
 func (c *ReplaceSM) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.MessageID) + len(c.ScheduleDeliveryTime) + len(c.ValidityPeriod) + 4)
@@ -54,7 +54,8 @@ func (c *ReplaceSM) Marshal(b *ByteBuffer) {
 		_ = b.WriteCString(c.ScheduleDeliveryTime)
 		_ = b.WriteCString(c.ValidityPeriod)
 		_ = b.WriteByte(c.RegisteredDelivery)
-		c.Message.Marshal(b)
+		// SMPP v3.4 §4.10.1: replace_sm has no data_coding field.
+		_ = c.Message.marshal(b, false)
 	})
 }
 
@@ -62,11 +63,11 @@ func (c *ReplaceSM) Marshal(b *ByteBuffer) {
 func (c *ReplaceSM) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.MessageID, err = b.ReadCString(); err == nil {
-			if err = c.SourceAddr.Unmarshal(b); err == nil {
+			if err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
 				if c.ScheduleDeliveryTime, err = b.ReadCString(); err == nil {
 					if c.ValidityPeriod, err = b.ReadCString(); err == nil {
 						if c.RegisteredDelivery, err = b.ReadByte(); err == nil {
-							err = c.Message.Unmarshal(b, false)
+							err = c.Message.unmarshal(b, false, false)
 						}
 					}
 				}

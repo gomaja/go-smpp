@@ -141,23 +141,32 @@ func (t Field) Uint32() (uint32, error) {
 
 // Marshal to writer.
 func (t *Field) Marshal(w *ByteBuffer) {
-	if len(t.Data) > 0 {
-		w.Grow(4 + len(t.Data))
-
-		w.WriteShort(int16(t.Tag))
-		w.WriteShort(int16(len(t.Data)))
-		_, _ = w.Write(t.Data)
+	if len(t.Data) > 65535 {
+		w.setError(fmt.Errorf("TLV length %d exceeds unsigned 16-bit maximum", len(t.Data)))
+		return
 	}
+	// SMPP v3.4 §3.2.4.1: tag and unsigned length are always present,
+	// including the zero-length alert_on_message_delivery (§5.3.2.41).
+	w.Grow(4 + len(t.Data))
+	w.WriteShort(int16(t.Tag))
+	w.WriteShort(int16(len(t.Data)))
+	_, _ = w.Write(t.Data)
 }
 
 // Unmarshal from reader.
 func (t *Field) Unmarshal(b *ByteBuffer) (err error) {
-	var tag, ln int16
-	if tag, err = b.ReadShort(); err == nil {
-		t.Tag = Tag(tag)
-		if ln, err = b.ReadShort(); err == nil {
-			t.Data, err = b.ReadN(int(ln))
-		}
+	// SMPP v3.4 §§3.1, 3.2.4.1: length is an unsigned two-octet
+	// integer. Check the entire TLV before consuming any part of it.
+	wire := b.Bytes()
+	if len(wire) < 4 {
+		return ErrBufferNotEnoughByteToRead
 	}
-	return
+	n := int(binary.BigEndian.Uint16(wire[2:4]))
+	if n > len(wire)-4 {
+		return ErrBufferNotEnoughByteToRead
+	}
+	t.Tag = Tag(binary.BigEndian.Uint16(wire[:2]))
+	t.Data = append([]byte(nil), wire[4:4+n]...)
+	b.Next(4 + n)
+	return nil
 }

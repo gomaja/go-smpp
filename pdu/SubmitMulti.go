@@ -54,13 +54,14 @@ func (c *SubmitMulti) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.5.1 Table 4-12: C-Octet maxima include NUL.
 func (c *SubmitMulti) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.ServiceType) + len(c.ScheduleDeliveryTime) + len(c.ValidityPeriod) + 10)
 
 		_ = b.WriteCString(c.ServiceType)
 		c.SourceAddr.Marshal(b)
-		c.DestAddrs.Marshal(b)
+		_ = c.DestAddrs.Marshal(b)
 		_ = b.WriteByte(c.EsmClass)
 		_ = b.WriteByte(c.ProtocolID)
 		_ = b.WriteByte(c.PriorityFlag)
@@ -68,7 +69,11 @@ func (c *SubmitMulti) Marshal(b *ByteBuffer) {
 		_ = b.WriteCString(c.ValidityPeriod)
 		_ = b.WriteByte(c.RegisteredDelivery)
 		_ = b.WriteByte(c.ReplaceIfPresentFlag)
-		c.Message.Marshal(b)
+		if err := c.Message.validateUDHI(c.EsmClass&data.SM_UDH_GSM != 0); err != nil {
+			b.setError(err)
+			return
+		}
+		_ = c.Message.Marshal(b)
 	})
 }
 
@@ -76,7 +81,7 @@ func (c *SubmitMulti) Marshal(b *ByteBuffer) {
 func (c *SubmitMulti) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.ServiceType, err = b.ReadCString(); err == nil {
-			if err = c.SourceAddr.Unmarshal(b); err == nil {
+			if err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
 				if err = c.DestAddrs.Unmarshal(b); err == nil {
 					if c.EsmClass, err = b.ReadByte(); err == nil {
 						if c.ProtocolID, err = b.ReadByte(); err == nil {

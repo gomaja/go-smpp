@@ -25,6 +25,9 @@ func TestErrorResponsesOmitBodyUnlessTLVs(t *testing.T) {
 			}
 			b := NewBuffer(nil)
 			response.Marshal(b)
+			if b.Err() != nil {
+				t.Fatalf("%T marshal error: %v", response, b.Err())
+			}
 			if !tlv && (b.Len() != 16 || binary.BigEndian.Uint32(b.Bytes()[:4]) != 16) {
 				t.Errorf("%T error length=%d, want 16", response, b.Len())
 			}
@@ -33,14 +36,8 @@ func TestErrorResponsesOmitBodyUnlessTLVs(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tlv {
-				var field Field
-				switch r := parsed.(type) {
-				case *BindResp:
-					field = r.OptionalParameters[TagAdditionalStatusInfoText]
-				case *SubmitSMResp:
-					field = r.OptionalParameters[TagAdditionalStatusInfoText]
-				}
-				if !bytes.Equal(field.Data, []byte("error\x00")) {
+				field, found := parsed.GetOptionalParam(TagAdditionalStatusInfoText)
+				if !found || !bytes.Equal(field.Data, []byte("error\x00")) {
 					t.Fatalf("%T lost error TLV", parsed)
 				}
 			}

@@ -1,10 +1,40 @@
 package pdu
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestAddressRejectsEmbeddedTerminator(t *testing.T) {
+	_, err := NewAddressWithAddr("A\x00B")
+	require.Error(t, err)
+}
+
+func TestAddressPreservesNonASCIIOctets(t *testing.T) {
+	for _, addr := range []string{"é", "A\x80\xff"} {
+		a, err := NewAddressWithAddr(addr)
+		require.NoError(t, err)
+		b := NewBuffer(nil)
+		a.Marshal(b)
+		require.NoError(t, b.Err())
+		var parsed Address
+		require.NoError(t, parsed.Unmarshal(NewBuffer(b.Bytes())))
+		require.Equal(t, a, parsed)
+	}
+}
+
+func TestAddressTerminatorLimit(t *testing.T) {
+	a, err := NewAddressWithAddr(strings.Repeat("1", 20))
+	require.NoError(t, err)
+	b := NewBuffer(nil)
+	a.Marshal(b)
+	require.Len(t, b.Bytes()[2:], 21)
+	require.NoError(t, a.SetAddress(strings.Repeat("1", 64)))
+	require.Error(t, a.SetAddress(strings.Repeat("1", 65)), "65 content octets plus NUL exceed the widest address field")
+	require.Equal(t, strings.Repeat("1", 64), a.Address())
+}
 
 func TestAddress(t *testing.T) {
 	t.Run("new", func(t *testing.T) {
@@ -14,7 +44,7 @@ func TestAddress(t *testing.T) {
 	})
 
 	t.Run("newWithAddr", func(t *testing.T) {
-		_, err := NewAddressWithAddr("1234567890123456789012")
+		_, err := NewAddressWithAddr(strings.Repeat("1", 65))
 		require.NotNil(t, err)
 	})
 

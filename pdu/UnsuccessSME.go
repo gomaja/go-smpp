@@ -1,6 +1,8 @@
 package pdu
 
 import (
+	"fmt"
+
 	"github.com/gomaja/go-smpp/data"
 )
 
@@ -39,7 +41,7 @@ func NewUnsuccessSMEWithTonNpi(ton, npi byte, status data.CommandStatusType) Uns
 // Unmarshal from buffer.
 func (c *UnsuccessSME) Unmarshal(b *ByteBuffer) (err error) {
 	var st int32
-	if err = c.Address.Unmarshal(b); err == nil {
+	if err = c.Address.unmarshal(b, data.ESME_RINVDSTADR); err == nil {
 		st, err = b.ReadInt()
 		if err == nil {
 			c.errorStatusCode = data.CommandStatusType(st)
@@ -103,6 +105,11 @@ func (c *UnsuccessSMEs) Unmarshal(b *ByteBuffer) (err error) {
 
 // Marshal to buffer.
 func (c *UnsuccessSMEs) Marshal(b *ByteBuffer) {
+	// SMPP v3.4 §5.2.26: no_unsuccess occupies one octet.
+	if len(c.l) > 255 {
+		b.setError(fmt.Errorf("unsuccessful SME count exceeds one-octet maximum of 255"))
+		return
+	}
 	n := byte(len(c.l))
 	_ = b.WriteByte(n)
 

@@ -168,3 +168,33 @@ See [specification compliance](docs/spec-compliance.md).
 - [x] enquire_link_resp
 - [x] alert_notification
 - [x] generic_nack
+
+## Breaking changes on main
+
+`PDU.OptionalParameters` is now an ordered `[]pdu.Field` that retains repeated
+TLVs. Replace `p.OptionalParameters[tag]` with `p.GetOptionalParam(tag)` for the
+first occurrence, or `p.GetOptionalParams(tag)` for all occurrences. Indexing
+by a tag still compiles but uses a slice index and may panic. In
+`for index, field := range p.OptionalParameters`, the first value is an index;
+read the tag from `field.Tag`. `RegisterOptionalParam` replaces the first
+occurrence; `AppendOptionalParam` adds another in wire order.
+
+Encoding failures are available through `ByteBuffer.Err()` and
+`errors.Is(err, pdu.ErrEncode)`. `Connection.WritePDU` returns
+`*pdu.EncodeError` with the offending PDU; `OnSubmitError` receives it while
+the session stays connected. Check buffer errors before writing marshalled bytes.
+
+Marshal and transports now check wire representability, allowing over-limit
+received fields to be forwarded. Call `pdu.Validate(p)` for all SMPP v3.4
+mandatory-field maxima; its joined `*pdu.ValidationError` values identify
+fields and suggested response statuses. Setters retain their construction
+limits. See [the receive/send policy](docs/spec-compliance.md#receive-and-send-length-policy).
+
+Address does not know its containing PDU; call `pdu.Validate` before sending
+to enforce the per-PDU 21/65-octet limits (including NUL). Address setters
+accept up to 64 content octets for every PDU, and Marshal preserves them.
+An address accepted by the setter can exceed submit_sm's maximum and be
+rejected by a strict SMSC. This allows a transit SMSC to forward accepted traffic.
+
+`ClearOptionalParameters` detaches the slice; later appends do not overwrite
+an earlier slice returned by `GetOptionalParameters`.

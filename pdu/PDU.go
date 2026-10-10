@@ -1,6 +1,8 @@
 package pdu
 
 import (
+	stderrors "errors"
+	"fmt"
 	"io"
 
 	"github.com/gomaja/go-smpp/data"
@@ -23,6 +25,24 @@ type PDU interface {
 
 	// RegisterOptionalParam assigns an optional param.
 	RegisterOptionalParam(Field)
+
+	// AppendOptionalParam appends an instance without replacing earlier tags.
+	AppendOptionalParam(Field)
+
+	// GetOptionalParam returns the first instance of a tag.
+	GetOptionalParam(Tag) (Field, bool)
+
+	// GetOptionalParams returns all instances of a tag in wire order.
+	GetOptionalParams(Tag) []Field
+
+	// GetOptionalParameters returns every optional parameter in wire order.
+	GetOptionalParameters() []Field
+
+	// ClearOptionalParameters removes every optional parameter.
+	ClearOptionalParameters()
+
+	// SetCommandStatus sets the command_status of the header.
+	SetCommandStatus(data.CommandStatusType)
 
 	// GetHeader returns PDU header.
 	GetHeader() Header
@@ -48,24 +68,26 @@ type PDU interface {
 
 type base struct {
 	Header
-	OptionalParameters map[Tag]Field
+	// OptionalParameters preserves wire order and duplicate tags. Indexes are
+	// slice positions, not tags; use GetOptionalParam (first wins) or
+	// GetOptionalParams for tag lookups. A two-value range yields index, field.
+	OptionalParameters []Field
 }
 
 func newBase() (v base) {
-	v.OptionalParameters = make(map[Tag]Field)
+	v.OptionalParameters = make([]Field, 0)
 	v.AssignSequenceNumber()
 	return
 }
 
-func (c *base) ensureOptionalParameters() {
-	if c.OptionalParameters == nil {
-		c.OptionalParameters = make(map[Tag]Field)
-	}
-}
+// GetOptionalParameters returns the PDU's optional parameters in wire order,
+// duplicates included. The slice belongs to the PDU; callers must synchronize
+// any access or modification. Clear detaches the slice, so later appends do
+// not overwrite a slice retained by the caller.
+func (c *base) GetOptionalParameters() []Field { return c.OptionalParameters }
 
-// GetOptionalParameters returns the PDU's optional fields. The returned map
-// belongs to the PDU; callers must synchronize any access or modification.
-func (c *base) GetOptionalParameters() map[Tag]Field { return c.OptionalParameters }
+// ClearOptionalParameters removes every optional parameter.
+func (c *base) ClearOptionalParameters() { c.OptionalParameters = nil }
 
 // SetCommandStatus sets the response status code.
 func (c *base) SetCommandStatus(status data.CommandStatusType) { c.CommandStatus = status }
@@ -81,7 +103,10 @@ func (c *base) unmarshal(b *ByteBuffer, bodyReader func(*ByteBuffer) error) (err
 	if err = c.Header.Unmarshal(b); err == nil {
 
 		// try to unmarshal body
-		if bodyReader != nil {
+		// SMPP v5 §3.2.1.3 permits body omission on failure. Also tolerate
+		// successful header-only responses from peers, with empty body fields.
+		headerOnlyResponse := uint32(c.CommandID)&0x80000000 != 0 && c.CommandLength == data.PDU_HEADER_SIZE
+		if bodyReader != nil && !headerOnlyResponse {
 			err = bodyReader(b)
 		}
 
@@ -118,16 +143,22 @@ func (c *base) unmarshal(b *ByteBuffer, bodyReader func(*ByteBuffer) error) (err
 }
 
 func (c *base) unmarshalOptionalParam(optParam []byte) (err error) {
-	c.ensureOptionalParameters()
+	// SMPP v3.4 §§3.2.4.1, 5.1.3: invalid TLV framing is an
+	// optional-parameter stream error, not a lost PDU frame.
+	defer func() { err = withDecodeStatus(err, data.ESME_RINVOPTPARSTREAM) }()
+	var fields []Field
 	buf := NewBuffer(optParam)
 	for buf.Len() > 0 {
 		var field Field
 		if err = field.Unmarshal(buf); err == nil {
-			c.OptionalParameters[field.Tag] = field
+			fields = append(fields, field)
 		} else {
 			return
 		}
 	}
+	// SMPP v3.4 §4.7.1 Table 4-20: repeatable callbacks and their
+	// presentation/alpha tags are associated by occurrence order.
+	c.OptionalParameters = fields
 	return
 }
 
@@ -144,6 +175,13 @@ func (c *base) marshal(b *ByteBuffer, bodyWriter func(*ByteBuffer)) {
 	for _, v := range c.OptionalParameters {
 		v.Marshal(bodyBuf)
 	}
+	if data.PDU_HEADER_SIZE+bodyBuf.Len() > data.MAX_PDU_LEN {
+		bodyBuf.setError(fmt.Errorf("PDU length exceeds supported maximum %d", data.MAX_PDU_LEN))
+	}
+	if bodyBuf.Err() != nil {
+		b.setError(fmt.Errorf("%w: %w", ErrEncode, bodyBuf.Err()))
+		return
+	}
 
 	// write header
 	c.CommandLength = int32(data.PDU_HEADER_SIZE + bodyBuf.Len())
@@ -153,10 +191,44 @@ func (c *base) marshal(b *ByteBuffer, bodyWriter func(*ByteBuffer)) {
 	b.WriteBuffer(bodyBuf)
 }
 
-// RegisterOptionalParam register optional param.
+// RegisterOptionalParam replaces the first instance of a tag, or appends it
+// when absent. Later instances and their ordering are preserved.
 func (c *base) RegisterOptionalParam(tlv Field) {
-	c.ensureOptionalParameters()
-	c.OptionalParameters[tlv.Tag] = tlv
+	for i := range c.OptionalParameters {
+		if c.OptionalParameters[i].Tag == tlv.Tag {
+			c.OptionalParameters[i] = tlv
+			return
+		}
+	}
+	c.AppendOptionalParam(tlv)
+}
+
+// AppendOptionalParam appends a parameter, preserving duplicate tags and order.
+func (c *base) AppendOptionalParam(tlv Field) {
+	c.OptionalParameters = append(c.OptionalParameters, tlv)
+}
+
+// GetOptionalParam returns the first parameter with the given tag.
+// Its Data aliases the PDU's data.
+func (c *base) GetOptionalParam(tag Tag) (Field, bool) {
+	for _, field := range c.OptionalParameters {
+		if field.Tag == tag {
+			return field, true
+		}
+	}
+	return Field{}, false
+}
+
+// GetOptionalParams returns all parameters with the given tag in wire order.
+// The returned fields' Data slices alias the PDU's data.
+func (c *base) GetOptionalParams(tag Tag) []Field {
+	var fields []Field
+	for _, field := range c.OptionalParameters {
+		if field.Tag == tag {
+			fields = append(fields, field)
+		}
+	}
+	return fields
 }
 
 // IsOk is status ok.
@@ -169,35 +241,18 @@ func (c *base) IsGNack() bool {
 	return c.CommandID == data.GENERIC_NACK
 }
 
-// GetSARConcatInfo checks optional TLV params for SAR fields and returns concatenation info.
+// GetSARConcatInfo reads the first occurrence of each SAR tag. A missing or
+// malformed first occurrence returns found=false, even if later ones are valid.
 func (c *base) GetSARConcatInfo() (totalParts, partNum byte, mref uint16, found bool) {
-	var foundRef, foundTot, foundSeq bool
-	// Iterate over all optional TLV fields attached to this PDU
-	for _, tlv := range c.OptionalParameters { // (Assume c.OptionalParams holds the list of TLV Field structs)
-		switch tlv.Tag {
-		case TagSarMsgRefNum: // SAR reference number (should be 2 bytes)
-			if len(tlv.Data) == 2 {
-				// Combine two bytes into a 16-bit reference (big-endian as per SMPP spec)
-				mref = uint16(tlv.Data[0])<<8 | uint16(tlv.Data[1])
-				foundRef = true
-			}
-		case TagSarTotalSegments: // Total number of segments (1 byte)
-			if len(tlv.Data) == 1 {
-				totalParts = tlv.Data[0]
-				foundTot = true
-			}
-		case TagSarSegmentSeqnum: // Segment sequence number (1 byte)
-			if len(tlv.Data) == 1 {
-				partNum = tlv.Data[0]
-				foundSeq = true
-			}
-		}
-	}
-	// All three must be found to consider the data complete
-	found = foundRef && foundTot && foundSeq
-	if !found {
-		// If any part is missing or lengths were incorrect, return with 'found' = false and zeros
-		totalParts, partNum, mref = 0, 0, 0
+	// Like GetOptionalParam, each SAR tag uses its first wire occurrence.
+	reference, hasRef := c.GetOptionalParam(TagSarMsgRefNum)
+	total, hasTotal := c.GetOptionalParam(TagSarTotalSegments)
+	sequence, hasSequence := c.GetOptionalParam(TagSarSegmentSeqnum)
+	found = hasRef && hasTotal && hasSequence && len(reference.Data) == 2 && len(total.Data) == 1 && len(sequence.Data) == 1
+	if found {
+		mref = uint16(reference.Data[0])<<8 | uint16(reference.Data[1])
+		totalParts = total.Data[0]
+		partNum = sequence.Data[0]
 	}
 	return
 }
@@ -205,7 +260,7 @@ func (c *base) GetSARConcatInfo() (totalParts, partNum byte, mref uint16, found 
 // GetOptionalMessagePayload returns the message bytes from the MessagePayload optional TLV
 // parameter (tag 0x0424). This is used when the message content is sent as a TLV parameter
 // instead of in the short_message field. Returns the message data and a boolean indicating
-// whether usable payload data was found.
+// whether usable payload data was found. The first wire occurrence wins.
 //
 // A MessagePayload parameter that is present but carries no data reports found = false, since
 // an empty payload is not usable as message content. Callers that need to distinguish an absent
@@ -213,24 +268,27 @@ func (c *base) GetSARConcatInfo() (totalParts, partNum byte, mref uint16, found 
 //
 // The returned slice is the PDU's own buffer, not a copy; mutating it mutates the PDU.
 func (c *base) GetOptionalMessagePayload() (data []byte, found bool) {
-	if field, exists := c.OptionalParameters[TagMessagePayload]; exists && len(field.Data) > 0 {
+	if field, exists := c.GetOptionalParam(TagMessagePayload); exists && len(field.Data) > 0 {
 		data = field.Data
 		found = true
 	}
 	return
 }
 
-// Parse PDU from reader.
+// Parse reads one complete PDU frame from r. Invalid content returns a
+// DecodeError after consuming the frame. Incomplete reads wrap ErrIncompletePDU
+// and the reader error; unsupported command lengths wrap ErrInvalidCommandLength.
 func Parse(r io.Reader) (pdu PDU, err error) {
 	var headerBytes [16]byte
 
 	if _, err = io.ReadFull(r, headerBytes[:]); err != nil {
+		err = fmt.Errorf("read PDU header: %w: %w", ErrIncompletePDU, err)
 		return
 	}
 
 	header := ParseHeader(headerBytes)
 	if header.CommandLength < 16 || header.CommandLength > data.MAX_PDU_LEN {
-		err = errors.ErrInvalidPDU
+		err = fmt.Errorf("%w (%d): %w", ErrInvalidCommandLength, header.CommandLength, errors.ErrInvalidPDU)
 		return
 	}
 
@@ -238,6 +296,7 @@ func Parse(r io.Reader) (pdu PDU, err error) {
 	bodyBytes := make([]byte, header.CommandLength-16)
 	if len(bodyBytes) > 0 {
 		if _, err = io.ReadFull(r, bodyBytes); err != nil {
+			err = fmt.Errorf("read PDU body: %w: %w", ErrIncompletePDU, err)
 			return
 		}
 	}
@@ -250,6 +309,24 @@ func Parse(r io.Reader) (pdu PDU, err error) {
 			_, _ = buf.Write(bodyBytes)
 		}
 		err = pdu.Unmarshal(buf)
+	}
+	if err != nil {
+		// SMPP v3.4 §§2.8, 3.3, 4.3, 5.1.3: a readable header and
+		// fully consumed body allow an error response for this PDU.
+		status := data.ESME_RINVPARLEN
+		var field *decodeFieldError
+		if stderrors.As(err, &field) {
+			status = field.status
+		}
+		// SMPP v3.4 §4.3: a frame too short for mandatory fields has
+		// an invalid command_length, even when the frame itself was fully read.
+		if stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF) || (stderrors.Is(err, ErrBufferNotEnoughByteToRead) && field == nil) {
+			status = data.ESME_RINVCMDLEN
+		} else if stderrors.Is(err, errors.ErrUnknownCommandID) {
+			status = data.ESME_RINVCMDID
+		}
+		err = &DecodeError{Header: header, Status: status, Err: err}
+		pdu = nil
 	}
 
 	return

@@ -44,6 +44,7 @@ func (c *AddressRange) Unmarshal(b *ByteBuffer) (err error) {
 }
 
 // Marshal to buffer.
+// SMPP v3.4 §3.3: longer bind address ranges are supported for interoperability.
 func (c *AddressRange) Marshal(b *ByteBuffer) {
 	b.Grow(3 + len(c.AddressRange))
 

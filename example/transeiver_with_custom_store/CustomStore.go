@@ -126,6 +126,9 @@ func (s CustomStore) Length(ctx context.Context) (int, error) {
 func serialize(request gosmpp.Request) ([]byte, error) {
 	buf := pdu.NewBuffer(make([]byte, 0, 64))
 	request.PDU.Marshal(buf)
+	if err := buf.Err(); err != nil {
+		return nil, err
+	}
 	b := bytes.Buffer{}
 	e := gob.NewEncoder(&b)
 	err := e.Encode(requestGob{

@@ -1,6 +1,7 @@
 package pdu
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
@@ -8,10 +9,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestReplaceSMMessageAssignmentWireFormat(t *testing.T) {
+	r := NewReplaceSM().(*ReplaceSM)
+	var err error
+	r.Message, err = NewShortMessageWithEncoding("A", data.ASCII)
+	require.NoError(t, err)
+	b := NewBuffer(nil)
+	r.Marshal(b)
+	parsed, err := Parse(bytes.NewReader(b.Bytes()))
+	require.NoError(t, err, "replace_sm has no data_coding field")
+	text, err := parsed.(*ReplaceSM).Message.GetMessage()
+	require.NoError(t, err)
+	require.Equal(t, "A", text)
+	// The same message value in submit_sm must include data_coding.
+	s := NewSubmitSM().(*SubmitSM)
+	s.Message = r.Message
+	b = NewBuffer(nil)
+	s.Marshal(b)
+	parsed, err = Parse(bytes.NewReader(b.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, data.ASCIICoding, parsed.(*SubmitSM).Message.Encoding().DataCoding())
+}
+
 func TestReplaceSM(t *testing.T) {
 	v := NewReplaceSM().(*ReplaceSM)
 	require.True(t, v.CanResponse())
-	require.True(t, v.Message.withoutDataCoding)
 	v.SequenceNumber = 13
 
 	validate(t,

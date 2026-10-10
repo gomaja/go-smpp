@@ -1,12 +1,37 @@
 package pdu
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestDestinationAddressesAddLimit(t *testing.T) {
+	d := NewDestinationAddress()
+	d.SetAddress(NewAddress())
+	var list DestinationAddresses
+	require.NoError(t, list.Add(make([]DestinationAddress, 254)...))
+	require.Error(t, list.Add(d))
+	require.Len(t, list.Get(), 254)
+	b := NewBuffer(nil)
+	NewSubmitMulti().Marshal(b)
+	body := b.Bytes()[16:]
+	wire := append([]byte(nil), body[:4]...)
+	wire = append(wire, 255)
+	for range 255 {
+		wire = append(wire, 1, 0, 0, 0)
+	}
+	wire = append(wire, body[5:]...)
+	parsed, err := Parse(bytes.NewReader(decodeTestFrame(data.SUBMIT_MULTI, wire)))
+	require.NoError(t, err)
+	require.Len(t, parsed.(*SubmitMulti).DestAddrs.Get(), 255)
+	require.Equal(t, data.SUBMIT_MULTI, parsed.GetHeader().CommandID)
+	require.EqualValues(t, 0x1020304, parsed.GetHeader().SequenceNumber)
+
+}
 
 func TestDestinationAddress(t *testing.T) {
 	t.Run("validDESTAddr", func(t *testing.T) {

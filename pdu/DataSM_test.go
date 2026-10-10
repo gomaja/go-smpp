@@ -31,7 +31,7 @@ func TestDataSM(t *testing.T) {
 	v.DataCoding = 91
 	v.RegisterOptionalParam(Field{Tag: TagDestBearerType, Data: []byte{95}})
 
-	tagged, ok := v.OptionalParameters[TagDestBearerType]
+	tagged, ok := v.GetOptionalParam(TagDestBearerType)
 	require.True(t, ok)
 	require.Equal(t, TagDestBearerType, tagged.Tag)
 	require.Equal(t, []byte{95}, tagged.Data)

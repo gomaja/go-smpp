@@ -3,6 +3,7 @@ package pdu
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
@@ -98,6 +99,36 @@ func TestBindingTypeString(t *testing.T) {
 			_, err := fmt.Fprintf(&formatted, "%s", tt.typ)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, formatted.String())
+		})
+	}
+}
+
+func TestBindCredentialInteroperability(t *testing.T) {
+	for _, binding := range []BindingType{Receiver, Transmitter, Transceiver} {
+		t.Run(binding.String(), func(t *testing.T) {
+			p := NewBindRequest(binding)
+			p.SystemID = strings.Repeat("I", 128)
+			p.Password = strings.Repeat("P", 128)
+			p.SystemType = strings.Repeat("T", 128)
+			p.AddressRange.AddressRange = strings.Repeat("R", 128)
+			b := NewBuffer(nil)
+			p.Marshal(b)
+			require.NoError(t, b.Err())
+			body := append([]byte(p.SystemID+"\x00"+p.Password+"\x00"+p.SystemType+"\x00"), 0x34, 0, 0)
+			body = append(body, []byte(p.AddressRange.AddressRange+"\x00")...)
+			require.Equal(t, body, b.Bytes()[16:])
+			got, err := Parse(bytes.NewReader(b.Bytes()))
+			require.NoError(t, err)
+			require.Equal(t, p, got)
+			for _, field := range []*string{&p.SystemID, &p.Password, &p.SystemType, &p.AddressRange.AddressRange} {
+				old := *field
+				*field = "A\x00B"
+				invalid := NewBuffer(nil)
+				p.Marshal(invalid)
+				require.ErrorIs(t, invalid.Err(), ErrEncode)
+				require.Empty(t, invalid.Bytes())
+				*field = old
+			}
 		})
 	}
 }

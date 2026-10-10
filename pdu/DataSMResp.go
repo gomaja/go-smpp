@@ -40,6 +40,7 @@ func (c *DataSMResp) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.7.2 Table 4-21: message_id maximum is 65 with NUL.
 func (c *DataSMResp) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.MessageID) + 1)

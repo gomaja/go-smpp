@@ -45,6 +45,7 @@ func (c *QuerySMResp) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.8.2 Table 4-23: C-Octet maxima include NUL.
 func (c *QuerySMResp) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.MessageID) + len(c.FinalDate) + 4)

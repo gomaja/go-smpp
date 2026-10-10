@@ -2,7 +2,8 @@
 
 This module currently implements SMPP v3.4 PDU and session behavior. The
 standards baseline below was checked on 2026-08-02 from the publishing
-authorities.
+authorities. The field codec and text-coding sections were rechecked on
+2026-10-10 against SMPP v3.4 Issue 1.2, v5, and ETSI TS 23.038/23.040 V19.0.0.
 
 Source links:
 
@@ -57,6 +58,43 @@ The boundary must be version-explicit:
   SMPP v5 and 3GPP TS 23.041 behavior not present in the current v3.4 API.
 
 ## Hardening inputs
+
+### C-Octet interoperability tolerance
+
+SMPP v3.4 §3.1 defines C-Octet strings as ASCII followed by NUL. This module
+deliberately accepts and preserves any non-NUL octet in these fields on both
+decode and encode. Real peers use Latin-1 and UTF-8 alphanumeric addresses;
+charset differences alone do not affect PDU framing. Encoding an embedded NUL
+is rejected because it would terminate the field early. Send-side field length limits include the terminator and count octets, not
+characters. Receive-side C-Octet lengths are bounded by the frame, not by
+the v3.4 field maxima.
+
+This tolerance does not apply to `data.ASCII`: explicitly encoding message
+text as ASCII still rejects unrepresentable characters.
+
+### Decode errors and response status
+
+SMPP v3.4 §2.8 requires an error response for an invalid request, while §4.3
+uses generic_nack for header errors. When `pdu.Parse` has read a valid-length
+header and the entire declared body, invalid content returns `*pdu.DecodeError`
+with the original header, a suggested command_status from §5.1.3, and an
+unwrap-compatible cause. The reader is positioned at the next PDU. The session
+layer chooses the appropriate response; the codec does not close connections.
+
+Missing short-message bytes and declared UDH overflows suggest ESME_RINVMSGLEN;
+malformed TLV framing suggests ESME_RINVOPTPARSTREAM. Overlong C-Octet fields,
+sm_length 255 and number_of_dests 255 are accepted when their bytes fit the frame. A fully received frame too short for
+its mandatory body suggests ESME_RINVCMDLEN (§4.3), rather than a parameter
+length error. Section 3.3 also specifies invalid
+parameter length for a variable-length parameter exceeding the supported
+maximum. Unknown commands suggest ESME_RINVCMDID after consuming their body.
+Malformed distribution-list names suggest ESME_RINVDLNAME and invalid
+destination flags ESME_RINVDESTFLAG, as distinct fields in §5.1.3.
+
+Incomplete frame reads wrap `pdu.ErrIncompletePDU` and the reader error.
+Invalid command lengths wrap `pdu.ErrInvalidCommandLength`, corresponding to
+ESME_RINVCMDLEN. These framing failures do not return a DecodeError and do not
+establish a safe next-PDU boundary.
 
 Public Go SMPP libraries and their issue trackers repeatedly expose the same
 failure classes: duplicated multipart sequence numbers, incorrect GSM 7-bit
@@ -129,3 +167,112 @@ also keep generated message IDs within eight octets (§3.4).
 
 Optional TLS is delegated to Go's `crypto/tls` with the caller's configuration.
 No independent TLS protocol implementation or TLS conformance claim is made.
+
+### Field maxima and response interoperability
+
+`pdu.Validate(p)` is an opt-in check of all mandatory-field maxima from SMPP
+v3.4 Tables 4-1–4-30 and §§5.2.21–24. It joins `*pdu.ValidationError` values,
+with a field name, suggested command_status (§5.1.3), and an underlying cause.
+It examines supplied fields even if an error response omits its body.
+Transports do not call it automatically.
+
+Validate suggests these statuses for C-Octet length violations (SMPP v3.4
+§5.1.3, Table 5-2):
+
+| Field | Suggested command_status | Value |
+| --- | --- | --- |
+| system_id | ESME_RINVSYSID | 0x0000000F |
+| password | ESME_RINVPASWD | 0x0000000E |
+| service_type | ESME_RINVSERTYP | 0x00000015 |
+| schedule_delivery_time | ESME_RINVSCHED | 0x00000061 |
+| validity_period | ESME_RINVEXPIRY | 0x00000062 |
+| message_id | ESME_RINVMSGID | 0x0000000C |
+| system_type, address_range, final_date | ESME_RINVPARLEN | 0x000000C2 |
+
+C-Octet maxima include NUL (§3.1.1): bind system IDs/passwords/system types/
+address ranges allow 16/9/13/41; service types 6; message IDs 65; times 17.
+DataSM and AlertNotification addresses allow 65 (Tables 4-20/4-30); other
+SME addresses allow 21. In strict v3.4 validation, unused deliver_sm times
+and deliver_sm_resp message_id must be NULL (Tables 4-18/4-19). Time syntax
+and the exact 1-or-17 size rule are not checked by this maximum validator.
+
+Address does not know its containing PDU; call `pdu.Validate` before sending
+to enforce the per-PDU 21/65-octet limits, including NUL. Address setters
+accept up to 64 content octets for every PDU, and Marshal preserves them.
+An application can therefore construct and send a submit_sm address exceeding
+its 21-octet field maximum; a strict SMSC may reject it. This tolerance lets
+a transit SMSC forward accepted traffic.
+
+Every response accepts an omitted body, with empty fields, on success or
+failure. Body omission on failure follows SMPP v5 §3.2.1.3; successful omission
+is an interop tolerance, especially for the unused deliver_sm_resp message_id
+(v3.4 §4.6.2). Full bodies remain readable. BindResp/SubmitSMResp also accept
+a final unterminated system_id/message_id up to the frame end. After a NUL,
+remaining bytes must form valid TLVs. Nonzero-status bind/submit responses
+without TLVs normalize to a header-only response on marshal.
+
+### Receive and send length policy
+
+SMPP v3.4 §3.3 permits supporting longer variable-length parameters. Receive
+and marshal preserve representable fields, allowing a transit SMSC to forward
+accepted traffic. Strict specification maxima are available through Validate.
+
+| Field | Receive | Marshal/send | Construction / Validate | Reason |
+| --- | --- | --- | --- | --- |
+| C-Octet strings, including credentials | Any NUL-terminated frame-bounded octets | Any length within MAX_PDU_LEN; embedded NUL rejected | Address setter: 64 content octets; list-name setter: 20. Validate: per-PDU v3.4 maxima | Preserve long credentials and forwarded peer fields |
+| sm_length / number_of_dests | 0–255 with all bytes/entries present | At most 255 | Message setters / destination Add: 254; Validate: 254 | One-octet wire fields permit 255 |
+| Segment count / TLV value length | Structurally bounded | At most 255 segments / 65535 TLV octets | Existing guards retained | Wire representation limits |
+| Response body | Missing body tolerated; bind/submit trailing unterminated string tolerated | Normal body emission, or header-only error normalization | Validate examines supplied fields | Avoid dropped binds and duplicate submission retries |
+| Message, TLV, UDH and mandatory-body framing | Structural errors return DecodeError | Framing and MAX_PDU_LEN enforced | Structural guards retained | Keep field boundaries intact |
+
+C-Octet strings preserve non-ASCII octets on receive and send despite v3.4
+§3.1's ASCII definition: real peers use Latin-1/UTF-8 alphanumeric addresses.
+`data.ASCII.Encode` remains strict when callers explicitly request ASCII text.
+The server's own ServerSettings.SystemID validation at Start is unchanged.
+Accepted terminated fields re-marshal byte-identically. A tolerated missing
+terminator is added on send; adding it can exceed MAX_PDU_LEN and return ErrEncode.
+
+SubmitToSystemID checks encoding synchronously before queuing. Encoding errors
+reported asynchronously keep the bind. An invalid handler response reports
+OnError and gets a header-only ESME_RSYSERR reply with the request sequence.
+The handler's closeBind decision still applies: when true, the server closes
+after writing the fallback; when false, the bind remains open.
+
+### User data and packed GSM conventions
+
+A bounded UDH with a truncated final information element is ignored as required
+by TS 23.040 §9.2.3.24. `ShortMessage.UDH()` exposes no parsed elements;
+`IgnoredUDH()` exposes the preserved raw header. Its declared header octets are
+skipped before returning payload and retained on marshal. A declared header
+that exceeds the short_message field still produces a message-length error.
+
+SMPP supplies an octet length without a GSM septet count. Packed encoding uses
+CR in a spare full septet, borrowing TS 23.038 §6.1.2.3.1's USSD convention;
+SMS packing's normative fill rule is zero padding (§6.1.2.1.1). Decoding supports
+both conventions and calculates septet capacity after UDH fill bits. The second rule doubles a terminal CR on an octet boundary. With no septet
+count, `AAAAAAA` with zero padding and `AAAAAAA@` have identical bytes;
+`AAAAAAA\r` with doubled padding and literal `AAAAAAA\r\r` also have
+identical bytes. Single-part messages cannot resolve these collisions without
+changing their text or adding an external count. The inferred decoder follows
+the padding convention;
+`data.DecodeGSM7Packed` accepts an explicit count when available. Raw packed
+messages are resegmented only when decode and re-encode preserve their bytes,
+with ambiguous tails additionally requiring retained original source text.
+Packed splitting moves boundaries to avoid ambiguous tails in generated parts.
+UDH fill bits have no receiver meaning (TS 23.040 §9.2.3.24) and are ignored.
+An escaped final septet is retained rather than interpreted as padding.
+
+Data-coding groups select their alphabet under TS 23.038 §4. GSM-alphabet
+custom encodings use escape-safe 160/153 septet budgets. UCS2 uses encoded
+UTF-16 octets. Compressed data-coding groups require TS 23.042 support and are
+retained as raw binary rather than encoded as uncompressed text. SMPP data_coding
+05/09/0A/0D/0E are distinct opaque text alphabets (§5.2.19), with 140-octet
+budgets; without a character-aware codec they remain unsplit if they fit and
+otherwise return an error. A caller-supplied custom codec without a splitter
+constructs at most 254 octets including UDH (SMPP v3.4 §§5.2.21–22);
+longer text returns an error. Parsed 255-octet fields still re-marshal unchanged.
+
+Optional-parameter lookups use the first occurrence consistently; all
+occurrences remain accessible in wire order. UDH concatenation information
+uses the last concatenation IE under TS 23.040 §9.2.3.24. Splitting replaces
+UDH concatenation metadata and drops stale SAR TLVs.

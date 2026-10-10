@@ -2,7 +2,9 @@ package gosmpp
 
 import (
 	"fmt"
+	"github.com/gomaja/go-smpp/data"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -173,4 +175,49 @@ func TestConcurrentSubmitClose(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+func TestSessionSurvivesEncodeFailure(t *testing.T) {
+	for _, kind := range []string{"terminator", "message_length", "pdu_length"} {
+		t.Run(kind, func(t *testing.T) {
+			auth := nextAuth()
+			submitErrors := make(chan error, 2)
+			responses := make(chan pdu.PDU, 4)
+			closed := make(chan State, 4)
+			session, err := NewSession(TRXConnector(NonTLSDialer, auth), Settings{ReadTimeout: 3 * time.Second, OnSubmitError: func(_ pdu.PDU, err error) { submitErrors <- err }, OnPDU: func(p pdu.PDU, _ bool) { responses <- p }, OnClosed: func(s State) { closed <- s }}, -1)
+			require.NoError(t, err)
+			defer func() { _ = session.Close() }()
+			invalid := newSubmitSM(auth.SystemID)
+			switch kind {
+			case "terminator":
+				invalid.ServiceType = "A\x00B"
+			case "message_length":
+				require.NoError(t, invalid.Message.SetLongMessageWithEnc(strings.Repeat("A", 300), data.GSM7BIT))
+			case "pdu_length":
+				invalid.AppendOptionalParam(pdu.NewField(pdu.TagMessagePayload, make([]byte, 65535)))
+			}
+			require.NoError(t, session.Transceiver().Submit(invalid))
+			select {
+			case err := <-submitErrors:
+				require.ErrorIs(t, err, pdu.ErrEncode)
+				var encode *pdu.EncodeError
+				require.ErrorAs(t, err, &encode)
+				require.Same(t, invalid, encode.PDU)
+				require.NotNil(t, encode.Unwrap())
+			case <-time.After(3 * time.Second):
+				t.Fatal("missing submit error")
+			}
+			valid := newSubmitSM(auth.SystemID)
+			require.NoError(t, session.Transceiver().Submit(valid))
+			select {
+			case got := <-responses:
+				require.Equal(t, data.SUBMIT_SM_RESP, got.GetHeader().CommandID)
+				require.Equal(t, valid.GetSequenceNumber(), got.GetSequenceNumber())
+			case state := <-closed:
+				t.Fatalf("session closed after encode failure: %v", state)
+			case <-time.After(3 * time.Second):
+				t.Fatal("next valid submit did not receive a response")
+			}
+		})
+	}
 }

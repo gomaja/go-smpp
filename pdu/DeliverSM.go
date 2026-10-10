@@ -53,6 +53,8 @@ func (c *DeliverSM) GetResponse() PDU {
 }
 
 // Marshal implements PDU interface.
+// SMPP v3.4 §4.6.1 Table 4-18; nonempty times follow the
+// documented SMPP v5 §4.3.1.1 Table 4-22 interoperability tolerance.
 func (c *DeliverSM) Marshal(b *ByteBuffer) {
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.ServiceType) + len(c.ScheduleDeliveryTime) + len(c.ValidityPeriod) + 10)
@@ -67,7 +69,11 @@ func (c *DeliverSM) Marshal(b *ByteBuffer) {
 		_ = b.WriteCString(c.ValidityPeriod)
 		_ = b.WriteByte(c.RegisteredDelivery)
 		_ = b.WriteByte(c.ReplaceIfPresentFlag)
-		c.Message.Marshal(b)
+		if err := c.Message.validateUDHI(c.EsmClass&data.SM_UDH_GSM != 0); err != nil {
+			b.setError(err)
+			return
+		}
+		_ = c.Message.Marshal(b)
 	})
 }
 
@@ -75,8 +81,8 @@ func (c *DeliverSM) Marshal(b *ByteBuffer) {
 func (c *DeliverSM) Unmarshal(b *ByteBuffer) error {
 	return c.base.unmarshal(b, func(b *ByteBuffer) (err error) {
 		if c.ServiceType, err = b.ReadCString(); err == nil {
-			if err = c.SourceAddr.Unmarshal(b); err == nil {
-				if err = c.DestAddr.Unmarshal(b); err == nil {
+			if err = c.SourceAddr.unmarshal(b, data.ESME_RINVSRCADR); err == nil {
+				if err = c.DestAddr.unmarshal(b, data.ESME_RINVDSTADR); err == nil {
 					if c.EsmClass, err = b.ReadByte(); err == nil {
 						if c.ProtocolID, err = b.ReadByte(); err == nil {
 							if c.PriorityFlag, err = b.ReadByte(); err == nil {

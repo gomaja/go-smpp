@@ -32,6 +32,25 @@ var (
 // ByteBuffer wraps over bytes.Buffer with additional features.
 type ByteBuffer struct {
 	*bytes.Buffer
+	err error
+}
+
+// Err returns the first error encountered while encoding into the buffer.
+// Callers must check Err before sending marshaled bytes.
+func (c *ByteBuffer) Err() error {
+	return c.err
+}
+
+// Reset clears the contents and any encoding error so the buffer can be reused.
+func (c *ByteBuffer) Reset() {
+	c.Buffer.Reset()
+	c.err = nil
+}
+
+func (c *ByteBuffer) setError(err error) {
+	if c.err == nil {
+		c.err = err
+	}
 }
 
 // NewBuffer create new buffer from preallocated buffer array.
@@ -95,9 +114,16 @@ func (c *ByteBuffer) WriteBuffer(d *ByteBuffer) {
 }
 
 func (c *ByteBuffer) writeString(st string, isCString bool, enc data.Encoding) (err error) {
+	defer func() { c.setError(err) }()
+	if isCString && bytes.IndexByte([]byte(st), 0) >= 0 {
+		return fmt.Errorf("C-Octet string contains an embedded terminator")
+	}
 	if len(st) > 0 {
 		var payload []byte
 		if payload, err = enc.Encode(st); err == nil {
+			if isCString && bytes.IndexByte(payload, 0) >= 0 {
+				return fmt.Errorf("encoded C-Octet string contains an embedded terminator")
+			}
 			_, _ = c.Write(payload)
 		}
 	}
@@ -111,7 +137,16 @@ func (c *ByteBuffer) writeString(st string, isCString bool, enc data.Encoding) (
 
 // WriteCString writes c-string.
 func (c *ByteBuffer) WriteCString(s string) error {
-	return c.writeString(s, true, data.ASCII)
+	if bytes.IndexByte([]byte(s), 0) >= 0 {
+		err := fmt.Errorf("C-Octet string contains an embedded terminator")
+		c.setError(err)
+		return err
+	}
+	// SMPP v3.4 §3.1 specifies ASCII; retain peer-provided octets for
+	// interoperability. Only embedded NUL would corrupt field framing.
+	_, _ = c.WriteString(s)
+	_ = c.WriteByte(0)
+	return nil
 }
 
 // WriteCStringWithEnc write c-string with encoding.
@@ -119,12 +154,16 @@ func (c *ByteBuffer) WriteCStringWithEnc(s string, enc data.Encoding) error {
 	return c.writeString(s, true, enc)
 }
 
-// ReadCString read c-string.
+// ReadCString reads a frame-bounded C-Octet string without a length limit.
+// An unterminated string returns its remaining octets together with io.EOF.
 func (c *ByteBuffer) ReadCString() (st string, err error) {
 	buf, err := c.ReadBytes(0)
-	if err == nil && len(buf) > 0 { // optimistic branching
-		st = string(buf[:len(buf)-1])
+	// Preserve every received octet. Mandatory fields still return EOF when
+	// unterminated; bind/submit responses deliberately tolerate a trailing EOF.
+	if err == nil && len(buf) > 0 {
+		buf = buf[:len(buf)-1]
 	}
+	st = string(buf)
 	return
 }
 

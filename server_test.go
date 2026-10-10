@@ -838,6 +838,172 @@ func TestServerSubmitToSystemID(t *testing.T) {
 	})
 }
 
+func TestServerOutgoingEncodeErrorKeepsBind(t *testing.T) {
+	for _, queued := range []bool{false, true} {
+		t.Run(fmt.Sprintf("alreadyQueued=%t", queued), func(t *testing.T) {
+			errs := make(chan error, 4)
+			srv, addr := startTestServer(t, ServerSettings{OnError: func(err error) { errs <- err }})
+			require.NoError(t, srv.StartSystemID(SystemIDConfig{SystemID: "sys", Password: "pw"}))
+			conn, resp := bind(t, addr, "sys", "pw", pdu.Transceiver)
+			require.Equal(t, data.ESME_ROK, resp.CommandStatus)
+			waitForSessions(t, srv, "sys", 1)
+
+			invalid := pdu.NewDeliverSM().(*pdu.DeliverSM)
+			invalid.ServiceType = "bad\x00type"
+			var err error
+			if queued {
+				// Exercise the write daemon's error callback independently of the
+				// public submission check, using the bound session's real queue.
+				srv.mu.Lock()
+				var trx *transceivable
+				for s := range srv.sessions["sys"] {
+					trx = s.trx.Load()
+				}
+				srv.mu.Unlock()
+				require.NotNil(t, trx)
+				require.NoError(t, trx.SubmitContext(context.Background(), invalid))
+				select {
+				case err = <-errs:
+				case <-time.After(testBindWait):
+					t.Fatal("queued encode failure was not reported")
+				}
+			} else {
+				err = srv.SubmitToSystemID(context.Background(), "sys", invalid)
+			}
+			require.ErrorIs(t, err, pdu.ErrEncode)
+			var encodeErr *pdu.EncodeError
+			require.ErrorAs(t, err, &encodeErr)
+			require.Same(t, invalid, encodeErr.PDU)
+
+			valid := pdu.NewDeliverSM().(*pdu.DeliverSM)
+			valid.ServiceType = "valid"
+			valid.SetSequenceNumber(812)
+			require.NoError(t, srv.SubmitToSystemID(context.Background(), "sys", valid))
+			require.NoError(t, conn.SetDeadline(time.Now().Add(testBindWait)))
+			got, err := pdu.Parse(conn)
+			require.NoError(t, err)
+			delivery, ok := got.(*pdu.DeliverSM)
+			require.True(t, ok, "expected delivery, got %T", got)
+			require.Equal(t, "valid", delivery.ServiceType)
+			require.Equal(t, int32(812), delivery.GetSequenceNumber())
+			require.Len(t, srv.GetSystemIDStatus("sys"), 1)
+			if !queued {
+				select {
+				case err := <-errs:
+					t.Fatalf("rejected submission reached the write daemon: %v", err)
+				default:
+				}
+			}
+		})
+	}
+}
+
+func TestServerHandlerEncodeErrorRepliesAndKeepsBind(t *testing.T) {
+	testServerHandlerEncodeError(t, false)
+}
+
+func TestServerHandlerEncodeErrorRepliesBeforeClosingBind(t *testing.T) {
+	testServerHandlerEncodeError(t, true)
+}
+
+func testServerHandlerEncodeError(t *testing.T, closeBind bool) {
+	t.Helper()
+	for _, tc := range []struct {
+		version byte
+		query   bool
+	}{{0x34, false}, {0x33, false}, {0x34, true}, {0x33, true}} {
+		t.Run(fmt.Sprintf("version=%x/query=%t", tc.version, tc.query), func(t *testing.T) {
+			errs := make(chan error, 4)
+			srv, addr := startTestServer(t, ServerSettings{OnError: func(err error) { errs <- err }})
+			require.NoError(t, srv.StartSystemID(SystemIDConfig{SystemID: "sys", Password: "pw",
+				OnPDU: func(_ ServerSessionInfo, request pdu.PDU) (pdu.PDU, bool) {
+					response := request.GetResponse()
+					switch r := response.(type) {
+					case *pdu.SubmitSMResp:
+						r.MessageID = "invalid\x00id"
+					case *pdu.QuerySMResp:
+						r.MessageID = "invalid\x00id"
+					}
+					response.SetSequenceNumber(999)
+					if tc.version < 0x34 {
+						response.RegisterOptionalParam(pdu.NewFieldUint8(pdu.TagScInterfaceVersion, 0x34))
+					}
+					return response, closeBind
+				}}))
+			conn, err := net.DialTimeout("tcp", addr, testBindWait)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+			require.NoError(t, conn.SetDeadline(time.Now().Add(testBindWait)))
+			bindRequest := pdu.NewBindRequest(pdu.Transceiver)
+			bindRequest.SystemID, bindRequest.Password, bindRequest.InterfaceVersion = "sys", "pw", tc.version
+			writeWire(t, conn, bindRequest)
+			bindResponse, err := pdu.Parse(conn)
+			require.NoError(t, err)
+			require.Equal(t, data.ESME_ROK, bindResponse.GetHeader().CommandStatus)
+			waitForSessions(t, srv, "sys", 1)
+
+			request := pdu.NewSubmitSM()
+			if tc.query {
+				request = pdu.NewQuerySM()
+			}
+			request.SetSequenceNumber(813)
+			writeWire(t, conn, request)
+			response, err := pdu.Parse(conn)
+			require.NoError(t, err)
+			if tc.query {
+				require.IsType(t, &pdu.QuerySMResp{}, response)
+			} else {
+				require.IsType(t, &pdu.SubmitSMResp{}, response)
+			}
+			require.Equal(t, data.ESME_RSYSERR, response.GetHeader().CommandStatus)
+			require.Equal(t, int32(16), response.GetHeader().CommandLength)
+			require.Equal(t, int32(813), response.GetSequenceNumber())
+			select {
+			case err := <-errs:
+				require.ErrorIs(t, err, pdu.ErrEncode)
+				var encodeErr *pdu.EncodeError
+				require.ErrorAs(t, err, &encodeErr)
+				require.Equal(t, int32(999), encodeErr.PDU.GetSequenceNumber())
+			case <-time.After(testBindWait):
+				t.Fatal("handler encode failure was not reported")
+			}
+
+			if closeBind {
+				// A complete fallback must arrive before the server closes TCP.
+				_, err = pdu.Parse(conn)
+				require.ErrorIs(t, err, io.EOF)
+				waitForSessions(t, srv, "sys", 0)
+				return
+			}
+
+			ping := pdu.NewEnquireLink()
+			ping.SetSequenceNumber(814)
+			writeWire(t, conn, ping)
+			response, err = pdu.Parse(conn)
+			require.NoError(t, err)
+			require.IsType(t, &pdu.EnquireLinkResp{}, response)
+			require.Equal(t, int32(814), response.GetSequenceNumber())
+			require.Len(t, srv.GetSystemIDStatus("sys"), 1)
+		})
+	}
+}
+
+func TestServerPreparePDUReportsMarshalError(t *testing.T) {
+	srv := NewServer(ServerSettings{})
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { _ = conn.Close(); _ = peer.Close() })
+	session := &serverSession{conn: conn, server: srv, systemID: "sys", interfaceVersion: 0x33}
+	response := pdu.NewSubmitSMResp().(*pdu.SubmitSMResp)
+	response.MessageID = "invalid\x00id"
+	response.RegisterOptionalParam(pdu.NewFieldUint8(pdu.TagScInterfaceVersion, 0x34))
+	got, err := session.preparePDU(response)
+	require.Nil(t, got)
+	require.ErrorIs(t, err, pdu.ErrEncode)
+	var encodeErr *pdu.EncodeError
+	require.ErrorAs(t, err, &encodeErr)
+	require.Same(t, response, encodeErr.PDU)
+}
+
 func TestServerSystemIDLength(t *testing.T) {
 	for _, n := range []int{15, 16} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {

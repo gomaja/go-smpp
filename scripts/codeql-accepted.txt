@@ -1,0 +1,12 @@
+# CodeQL findings that were reviewed and accepted, one per line:
+#   <rule id> <path> <primaryLocationLineHash>
+# The hash is CodeQL's fingerprint of the flagged line and its context. It
+# survives line shifts; when the flagged code changes the finding reappears
+# and must be reviewed again. scripts/validate.sh prints unaccepted findings
+# in this format.
+
+# passwordsEqual hashes both passwords with SHA-256 only to compare them in
+# constant time regardless of length; the digests are never stored, so this is
+# not password-storage hashing.
+go/weak-sensitive-data-hashing server.go f083a53ef478de4b:1
+go/weak-sensitive-data-hashing server.go 94c30d3253aa6bb8:1

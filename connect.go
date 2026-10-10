@@ -2,6 +2,7 @@ package gosmpp
 
 import (
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/gomaja/go-smpp/data"
@@ -75,11 +76,23 @@ func connect(dialer Dialer, addr string, bindReq *pdu.BindRequest) (c *Connectio
 	// create wrapped connection
 	c = NewConnection(conn)
 
-	// send binding request
-	_, err = c.WritePDU(bindReq)
+	// Send the bind request. It carries the password, so it is encoded here
+	// rather than through WritePDU: an encoding failure is reported from its
+	// cause alone, never with the request attached, where logging the error
+	// (%#v, a reflection-based or JSON logger) would print the credential.
+	buf := pdu.NewBuffer(nil)
+	bindReq.Marshal(buf)
+	if err = buf.Err(); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: bind request: %w", pdu.ErrEncode, err)
+	}
+	n, err := c.Write(buf.Bytes())
+	if err == nil && n != buf.Len() {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
 		_ = conn.Close()
-		return
+		return nil, err
 	}
 
 	// catching response

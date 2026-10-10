@@ -1,6 +1,10 @@
 package gosmpp
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"sync/atomic"
 	"testing"
 
@@ -99,4 +103,32 @@ func TestBindingType(t *testing.T) {
 		c := TRXConnector(NonTLSDialer, auth)
 		require.Equal(t, c.GetBindType(), pdu.Transceiver)
 	})
+}
+
+// A bind request that cannot be encoded must not come back inside the error:
+// it carries the password, and logging the error with any verb (or encoding it
+// as JSON) would print the credential.
+func TestBindEncodeErrorOmitsPassword(t *testing.T) {
+	const password = "pa\x00ss-secret"
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = conn.Close()
+		}
+	}()
+
+	_, err = TRXConnector(NonTLSDialer, Auth{SMSC: listener.Addr().String(), SystemID: "id", Password: password}).Connect()
+	require.Error(t, err)
+	require.ErrorIs(t, err, pdu.ErrEncode)
+	var encodeErr *pdu.EncodeError
+	require.False(t, errors.As(err, &encodeErr), "the error must not carry the bind request")
+	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
+		require.NotContains(t, fmt.Sprintf(format, err), "secret", format)
+	}
+	encoded, marshalErr := json.Marshal(err)
+	require.NoError(t, marshalErr)
+	require.NotContains(t, string(encoded), "secret")
 }

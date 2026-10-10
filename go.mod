@@ -7,15 +7,11 @@ go 1.24.0
 retract [v1.0.0, v1.0.1] // Tagged releases are withdrawn; depend on the main branch.
 
 require (
-	github.com/allegro/bigcache/v3 v3.1.0
+	github.com/allegro/bigcache/v3 v3.2.0
 	github.com/orcaman/concurrent-map/v2 v2.0.1
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.1
 	golang.org/x/exp v0.0.0-20250819193227-8b4c13bb791b
 	golang.org/x/text v0.34.0
 )
 
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-)
+require go.yaml.in/yaml/v3 v3.0.5 // indirect

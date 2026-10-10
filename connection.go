@@ -2,7 +2,9 @@ package gosmpp
 
 import (
 	"bufio"
+	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/gomaja/go-smpp/pdu"
@@ -13,6 +15,7 @@ type Connection struct {
 	systemID string
 	conn     net.Conn
 	reader   *bufio.Reader
+	writeMu  sync.Mutex
 }
 
 // NewConnection returns a Connection.
@@ -41,11 +44,36 @@ func (c *Connection) Write(b []byte) (n int, err error) {
 }
 
 // WritePDU data to the connection.
-func (c *Connection) WritePDU(p pdu.PDU) (n int, err error) {
+func (c *Connection) WritePDU(p pdu.PDU) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.writePDU(p)
+}
+
+// writePDUWithTimeout applies the deadline only after the preceding write has
+// finished. Otherwise a waiting response could extend an active delivery's
+// deadline, or spend its own timeout waiting for the writer lock.
+func (c *Connection) writePDUWithTimeout(p pdu.PDU, timeout time.Duration) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		return 0, err
+	}
+	return c.writePDU(p)
+}
+
+func (c *Connection) writePDU(p pdu.PDU) (n int, err error) {
 	buf := pdu.NewBuffer(make([]byte, 0, 64))
 	p.Marshal(buf)
 	n, err = c.conn.Write(buf.Bytes())
-	return
+	if err == nil && n != buf.Len() {
+		err = io.ErrShortWrite
+	}
+	return n, err
 }
 
 // Close closes the connection.

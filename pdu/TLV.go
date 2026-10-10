@@ -65,6 +65,9 @@ const (
 	TagItsSessionInfo           Tag = 0x1383
 )
 
+// TagScInterfaceVersion is the SMSC version (SMPP v3.4 §5.3.2.25).
+const TagScInterfaceVersion Tag = 0x0210
+
 // Field is a PDU Tag-Length-Value (TLV) field
 type Field struct {
 	Tag  Tag

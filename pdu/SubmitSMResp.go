@@ -44,6 +44,13 @@ func (c *SubmitSMResp) GetResponse() PDU {
 
 // Marshal implements PDU interface.
 func (c *SubmitSMResp) Marshal(b *ByteBuffer) {
+	// SMPP v3.4 §4.4.2: failed responses omit the body.
+	// Retain mandatory-field framing when explicitly registered error TLVs
+	// need to remain parseable (SMPP v5 §4.8.4.1).
+	if c.CommandStatus != data.ESME_ROK && len(c.OptionalParameters) == 0 {
+		c.base.marshal(b, nil)
+		return
+	}
 	c.base.marshal(b, func(b *ByteBuffer) {
 		b.Grow(len(c.MessageID) + 1)
 

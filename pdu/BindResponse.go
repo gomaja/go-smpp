@@ -73,6 +73,13 @@ func (c *BindResp) GetResponse() PDU {
 
 // Marshal implements PDU interface.
 func (c *BindResp) Marshal(b *ByteBuffer) {
+	// SMPP v3.4 §§4.1.2, 4.1.4, 4.1.6: failed responses omit the body.
+	// Retain mandatory-field framing when explicitly registered error TLVs
+	// need to remain parseable (SMPP v5 §4.8.4.1).
+	if c.CommandStatus != data.ESME_ROK && len(c.OptionalParameters) == 0 {
+		c.base.marshal(b, nil)
+		return
+	}
 	c.base.marshal(b, func(w *ByteBuffer) {
 		w.Grow(len(c.SystemID) + 1)
 
@@ -82,7 +89,7 @@ func (c *BindResp) Marshal(b *ByteBuffer) {
 
 // Unmarshal implements PDU interface.
 //
-// The system_id field is read unconditionally, since Marshal always writes it.
+// Accept both header-only errors and peers that include the system_id field.
 // An absent field is tolerated so that responses omitting system_id still parse,
 // matching how SubmitSMResp handles its message_id.
 func (c *BindResp) Unmarshal(b *ByteBuffer) error {

@@ -9,8 +9,18 @@ SMPP (3.4) Client Library in pure Go.
 
 ## Installation
 ```
-go get -u github.com/gomaja/go-smpp
+go get github.com/gomaja/go-smpp@main
 ```
+
+## Versioning
+
+This module publishes no releases. `main` is the only supported line, and its
+API changes whenever a better design is found, without a deprecation period.
+Go records the commit you build against as a pseudo-version in your `go.mod`;
+upgrade by running the command above again.
+
+The former tags `v1.0.0` and `v1.0.1` are retracted, so `go get` warns about
+them and `@latest` resolves to the tip of `main`.
 
 ## Usage
 

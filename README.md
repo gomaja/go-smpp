@@ -1,7 +1,5 @@
 # go-smpp
 
-[![ci](https://github.com/gomaja/go-smpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gomaja/go-smpp/actions/workflows/ci.yml)
-[![security](https://github.com/gomaja/go-smpp/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/gomaja/go-smpp/actions/workflows/security.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/gomaja/go-smpp)](https://goreportcard.com/report/github.com/gomaja/go-smpp)
 [![pkg.go.dev](https://pkg.go.dev/badge/github.com/gomaja/go-smpp.svg)](https://pkg.go.dev/github.com/gomaja/go-smpp)
 
@@ -14,6 +12,9 @@ go get github.com/gomaja/go-smpp@main
 
 ## Versioning
 
+The module requires Go 1.26 or later and is tested on the Go releases that are
+still supported upstream (currently 1.26 and 1.27); the minimum moves with them.
+
 This module publishes no releases. `main` is the only supported line, and its
 API changes whenever a better design is found, without a deprecation period.
 Go records the commit you build against as a pseudo-version in your `go.mod`;
@@ -21,6 +22,27 @@ upgrade by running the command above again.
 
 The former tags `v1.0.0` and `v1.0.1` are retracted, so `go get` warns about
 them and `@latest` resolves to the tip of `main`.
+
+## Validation
+
+The repository runs no hosted CI. Every check runs locally with one command,
+before each push and merge:
+
+```
+scripts/validate.sh            # everything below
+scripts/validate.sh --fast     # skip race, extra toolchains and CodeQL
+scripts/validate.sh --fuzz 30s # also run each fuzz target for 30s
+```
+
+It checks formatting and whitespace, `go mod tidy`/`verify`, build, vet, tests
+with and without `-race` on the host (linux/amd64), the other supported Go
+toolchains, vet and test compilation for linux/arm64, 32-bit, big-endian,
+Windows and macOS targets, staticcheck, golangci-lint, govulncheck, gitleaks
+over the history and the working tree, shellcheck for the script itself, and
+CodeQL with the `security-extended` and `security-and-quality` suites when the
+`codeql` CLI is installed. Tool versions are pinned in the script. CodeQL
+findings that were reviewed and accepted are listed in
+`scripts/codeql-accepted.txt`.
 
 ## Usage
 

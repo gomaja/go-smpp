@@ -3,12 +3,13 @@ package gosmpp
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/gomaja/go-smpp/pdu"
 	cmap "github.com/orcaman/concurrent-map/v2"
-	"golang.org/x/exp/maps"
 )
 
 // Request represent a request tracked by the RequestStore
@@ -69,7 +70,7 @@ func (s DefaultStore) List(ctx context.Context) []Request {
 	case <-ctx.Done():
 		return []Request{}
 	default:
-		return maps.Values(s.store.Items())
+		return slices.Collect(maps.Values(s.store.Items()))
 	}
 }
 

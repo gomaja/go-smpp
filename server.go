@@ -55,8 +55,8 @@ type ServerSessionInfo struct {
 // SMPP v3.4 §§2.5–2.6 and v5 §2.4 restrict inbound data_sm to TX/TRX
 // and inbound data_sm_resp to RX/TRX.
 // Its response is written before closing when closeBind is true.
-// ServerPDUHandler callbacks must not call Stop synchronously: Stop can wait for
-// the callback's own goroutine. Request shutdown in a separate goroutine instead.
+// ServerPDUHandler callbacks may call Stop or StopSystemID to initiate shutdown.
+// The callback must return before cleanup finishes; an external call joins it.
 type ServerPDUHandler func(ServerSessionInfo, pdu.PDU) (resp pdu.PDU, closeBind bool)
 
 // ServerSettings configures an SMSC listener and its bind exchange.
@@ -68,21 +68,26 @@ type ServerSettings struct {
 	// TLSConfig optionally enables TLS on the listener.
 	TLSConfig *tls.Config
 	// BindTimeout bounds the entire bind exchange; non-positive uses DefaultBindTimeout.
+	// Enquiries, generic nacks and intact unknown commands share a limit of eight
+	// pre-bind messages; none extends the deadline. Unknown commands receive a nack.
 	BindTimeout time.Duration
 	// OnError receives bind, accept and bound I/O errors without passwords.
-	// OnError callbacks must not call Stop synchronously: Stop can wait for the
-	// callback's own goroutine. Request shutdown in a separate goroutine instead.
+	// Pre-bind unknown commands report their first occurrence and one aggregate
+	// with control counts when the handshake ends. Its terminal error is included
+	// in that aggregate; intentional shutdown suppresses the final diagnostic.
+	// OnError callbacks may call Stop or StopSystemID to initiate shutdown.
+	// The callback must return before cleanup finishes; an external call joins it.
 	OnError ErrorCallback
 }
 
 // DefaultBindTimeout is the bind exchange deadline applied when
-// ServerSettings.BindTimeout is not set.
+// ServerSettings.BindTimeout or the client connector bind timeout is not set.
 const DefaultBindTimeout = 30 * time.Second
 
 // SystemIDConfig configures an ESME account. Empty BindingTypes allows TX, RX
 // and TRX; zero MaxSessions is unlimited. Non-positive timeouts disable deadlines.
 // OnPDU handles traffic other than enquire_link, unbind and repeated binds.
-// Callbacks must return for Stop to finish; invoke Stop outside a callback.
+// Callbacks must return for external Stop and StopSystemID calls to finish.
 type SystemIDConfig struct {
 	// SystemID is the required, non-empty ESME account identifier.
 	SystemID string
@@ -113,6 +118,7 @@ type credentials struct {
 // NewServer is required. A zero Server's error-returning methods report
 // ErrServerNotInitialized; accessors return empty values and shutdown is a no-op.
 type Server struct {
+	callbacks callbackScope
 	settings  ServerSettings
 	mu        sync.Mutex
 	listener  net.Listener
@@ -171,16 +177,22 @@ func (srv *Server) StartSystemID(config SystemIDConfig) error {
 }
 
 // StopSystemID removes an account and closes its bound and reserved connections.
+// External callers wait for their workers and callbacks. Inside this server's
+// callback, or when joining would complete a wait cycle between instances, it
+// initiates shutdown and returns; remaining callbacks can run during cleanup.
+// One-way calls from another instance join. Application goroutines are external
+// and their waits are not tracked. A subsequent external call joins completion.
+// Cycle detection includes all workers in the Server. Stopping one account can
+// therefore return conservatively when another account forms a Server wait cycle.
 func (srv *Server) StopSystemID(systemID string) {
 	if srv.ctx == nil {
 		return
 	}
 	srv.mu.Lock()
-	account := srv.credStore[systemID]
 	delete(srv.credStore, systemID)
 	var sessions []*serverSession
 	for s := range srv.connections {
-		if account != nil && s.account == account {
+		if s.systemID == systemID {
 			sessions = append(sessions, s)
 		}
 	}
@@ -189,6 +201,11 @@ func (srv *Server) StopSystemID(systemID string) {
 	srv.mu.Unlock()
 	for _, s := range sessions {
 		s.abort()
+	}
+	for _, s := range sessions {
+		if !joinCallbackScope(&srv.callbacks, s.finished) {
+			return
+		}
 	}
 }
 
@@ -235,10 +252,13 @@ func (srv *Server) Addr() net.Addr {
 	return srv.listener.Addr()
 }
 
-// Stop closes all connections and waits for their server cleanup. Concurrent
-// calls wait for the same shutdown. An already-running application handler can
-// outlive Stop because the underlying I/O close path is asynchronous.
-// Callbacks must request Stop from a separate goroutine.
+// Stop closes all connections and waits for workers and application callbacks.
+// Concurrent external calls join the same shutdown. Inside this server's callback,
+// or when joining would complete a wait cycle between instances, Stop initiates
+// shutdown and returns; remaining callbacks can run during cleanup. The calling
+// callback must return. One-way calls from another instance join. Application
+// goroutines are external and their waits are not tracked.
+// Cycle detection includes all workers in the Server as one lifecycle target.
 func (srv *Server) Stop() {
 	if srv.ctx == nil {
 		return
@@ -246,7 +266,7 @@ func (srv *Server) Stop() {
 	srv.mu.Lock()
 	if srv.stopped {
 		srv.mu.Unlock()
-		<-srv.stopDone
+		joinCallbackScope(&srv.callbacks, srv.stopDone)
 		return
 	}
 	srv.stopped = true
@@ -264,8 +284,12 @@ func (srv *Server) Stop() {
 	for _, s := range sessions {
 		s.abort()
 	}
-	srv.wg.Wait()
-	close(srv.stopDone)
+	go func() {
+		defer close(srv.stopDone)
+		defer registerCallbackWorker(&srv.callbacks)()
+		srv.wg.Wait()
+	}()
+	joinCallbackScope(&srv.callbacks, srv.stopDone)
 }
 
 const (
@@ -275,6 +299,7 @@ const (
 
 func (srv *Server) acceptLoop() {
 	defer srv.wg.Done()
+	defer registerCallbackWorker(&srv.callbacks)()
 	var retryDelay time.Duration
 	for srv.active.Load() {
 		conn, err := srv.listener.Accept()
@@ -282,7 +307,7 @@ func (srv *Server) acceptLoop() {
 			if !srv.active.Load() || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			srv.reportError(err)
+			srv.reportWorkerError(err)
 			if retryDelay == 0 {
 				retryDelay = acceptRetryDelayMin
 			} else {
@@ -314,16 +339,24 @@ func (srv *Server) acceptLoop() {
 
 func (srv *Server) reportError(err error) {
 	if srv.settings.OnError != nil {
-		srv.settings.OnError(err)
+		invokeExternalCallback(&srv.callbacks, func() { srv.settings.OnError(err) })
+	}
+}
+
+func (srv *Server) reportWorkerError(err error) {
+	if srv.settings.OnError != nil {
+		invokeCallback(&srv.callbacks, func() { srv.settings.OnError(err) })
 	}
 }
 
 func (srv *Server) handleConnection(s *serverSession) {
 	defer srv.wg.Done()
+	defer registerCallbackWorker(&srv.callbacks)()
 	defer func() {
 		s.close()
 		if trx := s.trx.Load(); trx != nil {
-			_ = trx.Close()
+			trx.stop(ExplicitClosing)
+			<-trx.done
 		}
 		srv.mu.Lock()
 		if s.account != nil {
@@ -339,8 +372,8 @@ func (srv *Server) handleConnection(s *serverSession) {
 		close(s.finished)
 	}()
 	if err := s.handleBind(); err != nil {
-		if srv.active.Load() && !s.closing.Load() {
-			srv.reportError(err)
+		if srv.active.Load() && !s.closing.Load() && !s.bindDiagnosticReported {
+			srv.reportWorkerError(err)
 		}
 		return
 	}
@@ -450,6 +483,7 @@ func (srv *Server) SubmitToSystemID(ctx context.Context, systemID string, p pdu.
 
 type serverSession struct {
 	conn             net.Conn
+	connection       *Connection // One writer and retained reader for the whole exchange.
 	server           *Server
 	systemID         string
 	bindingType      pdu.BindingType
@@ -462,6 +496,8 @@ type serverSession struct {
 	closing  atomic.Bool // Intentional shutdown, distinct from an I/O failure.
 	done     chan struct{}
 	finished chan struct{}
+	// Written by the handshake worker before handleConnection resumes.
+	bindDiagnosticReported bool
 }
 
 func newServerSession(conn net.Conn, srv *Server) *serverSession {
@@ -508,20 +544,117 @@ func (s *serverSession) reserveSlot(br *pdu.BindRequest) (data.CommandStatusType
 	return data.ESME_ROK, ""
 }
 
-func (s *serverSession) handleBind() error {
+func (s *serverSession) handleBind() (bindErr error) {
 	if err := s.conn.SetDeadline(time.Now().Add(s.server.bindTimeout())); err != nil {
 		return s.newServerBindError("set bind deadline", err)
 	}
-	p, err := pdu.Parse(s.conn)
-	if err != nil {
-		return s.newServerBindError(err.Error(), err)
+	s.connection = NewConnection(s.conn)
+	// Bound Open-state work independently of the absolute bind deadline. The
+	// limit is local policy; SMPP specifies no pre-bind traffic count limit.
+	controls := 0
+	var enquiries, nacks, unknowns int
+	firstReported := false
+	defer func() {
+		// Permitted controls alone are not errors. Unknown commands and a
+		// terminal failure after controls get one summary instead of per-frame
+		// diagnostics. Include the rejected ninth control in these counts.
+		if unknowns == 0 && (bindErr == nil || controls == 0) {
+			return
+		}
+		s.server.mu.Lock()
+		stopped := s.server.stopped
+		s.server.mu.Unlock()
+		if stopped || s.closing.Load() {
+			return
+		}
+		reason := fmt.Sprintf("pre-bind control messages: enquire_link=%d generic_nack=%d unknown_command=%d", enquiries, nacks, unknowns)
+		if bindErr != nil {
+			reason += "; " + bindErr.Error()
+		}
+		s.bindDiagnosticReported = true
+		s.server.reportWorkerError(s.newServerBindError(reason, bindErr))
+	}()
+	consumeControl := func() error {
+		if controls >= 8 {
+			return s.newServerBindError("pre-bind control message limit exceeded", nil)
+		}
+		controls++
+		return nil
 	}
-	br, ok := p.(*pdu.BindRequest)
-	if !ok {
-		return s.newServerBindError("first message is not bind request", errors.New("first message is not bind request"))
+	var br *pdu.BindRequest
+	for br == nil {
+		// Raw reads leave pipelined post-bind bytes on the socket. The retained
+		// Connection's buffered reader takes ownership only after binding.
+		frame := &frameReader{Reader: s.conn}
+		p, err := pdu.Parse(frame)
+		if err != nil {
+			var decoded *pdu.DecodeError
+			if errors.As(err, &decoded) {
+				if decoded.Status == data.ESME_RINVCMDID {
+					unknowns++
+					if err := consumeControl(); err != nil {
+						return err
+					}
+					// SMPP v3.4 §§3.3, 4.3: nack an intact unknown command.
+					// Its fully consumed frame permits the bind wait to continue.
+					replyErr := s.writeBindErrorResponse(pdu.NewGenericNack(), decoded.Status, decoded.Header.SequenceNumber, err)
+					if !replyErr.ResponseSent {
+						return replyErr
+					}
+					if !firstReported {
+						firstReported = true
+						s.server.reportWorkerError(replyErr)
+					}
+					continue
+				}
+				switch decoded.Header.CommandID {
+				case data.BIND_RECEIVER, data.BIND_TRANSMITTER, data.BIND_TRANSCEIVER:
+					// SMPP v3.4 §2.8: a body error uses its matching response,
+					// with the parser's suggested error status and no body.
+					response, _ := pdu.CreatePDUFromCmdID(data.CommandIDType(uint32(decoded.Header.CommandID) | 0x80000000))
+					return s.writeBindErrorResponse(response, decoded.Status, decoded.Header.SequenceNumber, err)
+				}
+			} else if frame.n > 0 {
+				// SMPP v3.4 §§4.3, 4.3.1: damaged framing gets RINVCMDLEN;
+				// retain the sequence only when the full header was received.
+				var sequence int32
+				if frame.n == len(frame.header) {
+					sequence = pdu.ParseHeader(frame.header).SequenceNumber
+				}
+				return s.writeBindErrorResponse(pdu.NewGenericNack(), data.ESME_RINVCMDLEN, sequence, err)
+			}
+			return s.newServerBindError(err.Error(), err)
+		}
+		// SMPP v5 §2.4 Table 2-1 permits enquiry and nack in Open
+		// (https://smpp.org/SMPP_v5.pdf). v3.4 Issue 1.2 §2.3 Table 2-1
+		// lists only bound states (https://smpp.org/SMPP_v3_4_Issue1_2.pdf).
+		// Keep the original deadline across these Open-state exchanges.
+		switch request := p.(type) {
+		case *pdu.EnquireLink:
+			enquiries++
+			if err := consumeControl(); err != nil {
+				return err
+			}
+			// v3.4 §4.11: echo the enquiry's sequence in its response.
+			if _, err := s.connection.WritePDU(request.GetResponse()); err != nil {
+				return s.newServerBindError("write enquire_link response", err)
+			}
+		case *pdu.GenericNack:
+			nacks++
+			if err := consumeControl(); err != nil {
+				return err
+			}
+			// No server bind request is outstanding to correlate this nack.
+		case *pdu.BindRequest:
+			br = request
+		default:
+			return s.newServerBindError("first message is not bind request", errors.New("first message is not bind request"))
+		}
 	}
 	status, reason := s.reserveSlot(br)
 	resp := br.GetResponse().(*pdu.BindResp)
+	// SMPP v3.4 §5.1.3: request command_status is unused. Derive the
+	// response status solely from local bind validation.
 	resp.CommandStatus = status
 	if status == data.ESME_ROK {
 		// SMPP v3.4 §§4.1.2, 4.1.4, 4.1.6: return the SMSC identifier.
@@ -533,7 +666,7 @@ func (s *serverSession) handleBind() error {
 			resp.RegisterOptionalParam(pdu.NewFieldUint8(pdu.TagScInterfaceVersion, data.SMPP_V34))
 		}
 	}
-	_, err = NewConnection(s.conn).WritePDU(resp)
+	_, err := s.connection.WritePDU(resp)
 	if status != data.ESME_ROK {
 		return s.newDecodedServerBindError(br, status, reason, err, err == nil)
 	}
@@ -541,6 +674,19 @@ func (s *serverSession) handleBind() error {
 		return s.newDecodedServerBindError(br, status, "write bind response", err, false)
 	}
 	return nil
+}
+
+// SMPP v3.4 §§2.8, 4.3 and v5 §3.2.1.3 require header-only error
+// responses (https://smpp.org/SMPP_v3_4_Issue1_2.pdf,
+// https://smpp.org/SMPP_v5.pdf). No undecoded credentials are exposed.
+func (s *serverSession) writeBindErrorResponse(response pdu.PDU, status data.CommandStatusType, sequence int32, cause error) *ServerBindError {
+	response.SetCommandStatus(status)
+	response.SetSequenceNumber(sequence)
+	_, writeErr := s.connection.WritePDU(headerOnlyResponse{response})
+	err := s.newServerBindError(cause.Error(), errors.Join(cause, writeErr))
+	err.CommandStatus = status
+	err.ResponseSent = writeErr == nil
+	return err
 }
 
 func (s *serverSession) newServerBindError(reason string, err error) *ServerBindError {
@@ -562,10 +708,36 @@ func (s *serverSession) contextError(err error) error {
 func (s *serverSession) reportIOError(err error) {
 	// Suppress transport-close errors caused by our own shutdown. A genuine
 	// write failure can precede close but reach its callback afterward.
-	if (s.closed.Load() || s.closing.Load()) && (errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)) {
+	if (s.closed.Load() || s.closing.Load()) && (errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, ErrConnectionClosing)) {
 		return
 	}
-	s.server.reportError(s.contextError(err))
+	s.server.reportWorkerError(s.contextError(err))
+}
+
+// SubmitError identifies a PDU that could not be written, including queued
+// PDUs discarded during shutdown. ServerSettings.OnError receives this error
+// wrapped with account and address context; errors.As retrieves the PDU.
+type SubmitError struct {
+	PDU pdu.PDU
+	Err error
+}
+
+func (e *SubmitError) Error() string {
+	return fmt.Sprintf("submit %T sequence %d: %v", e.PDU, e.PDU.GetSequenceNumber(), e.Err)
+}
+func (e *SubmitError) Unwrap() error { return e.Err }
+
+func (s *serverSession) reportSubmitError(p pdu.PDU, err error) {
+	s.server.reportWorkerError(s.contextError(&SubmitError{PDU: p, Err: err}))
+}
+
+func (s *serverSession) reportResponseError(p pdu.PDU, err error) {
+	// A handler that stopped its account cannot respond afterward. Queued
+	// application submissions still go through reportSubmitError unconditionally.
+	if (s.closed.Load() || s.closing.Load()) && (errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, ErrConnectionClosing)) {
+		return
+	}
+	s.reportSubmitError(p, err)
 }
 
 func (s *serverSession) startIO() error {
@@ -577,14 +749,18 @@ func (s *serverSession) startIO() error {
 		OnReceivingError: func(err error) {
 			s.reportIOError(err)
 		},
-		OnSubmitError: func(_ pdu.PDU, err error) {
-			s.reportIOError(err)
-			if !errors.Is(err, pdu.ErrEncode) {
+		OnSubmitError: func(p pdu.PDU, err error) {
+			s.reportSubmitError(p, err)
+			if !errors.Is(err, pdu.ErrEncode) && !errors.Is(err, ErrWindowsFull) {
 				s.close()
 			}
 		},
 		OnClosed: func(State) { s.close() }}
-	trx := newTransceivable(NewConnection(s.conn), settings, nil)
+	if s.connection == nil {
+		s.connection = NewConnection(s.conn)
+	}
+	trx := newTransceivable(s.connection, settings, nil)
+	trx.callbacks.parent = &s.server.callbacks
 	s.trx.Store(trx)
 	trx.start()
 	return nil
@@ -622,6 +798,7 @@ func (s *serverSession) handlePDU(p pdu.PDU) (pdu.PDU, bool) {
 		}
 	}
 	if response != nil {
+		originalResponse := response
 		var err error
 		response, err = s.preparePDU(response)
 		// Write the response synchronously so unbind_resp reaches the peer before
@@ -631,22 +808,24 @@ func (s *serverSession) handlePDU(p pdu.PDU) (pdu.PDU, bool) {
 			_, err = trx.conn.writePDUWithTimeout(response, s.config.WriteTimeout)
 		}
 		if err != nil {
-			s.reportIOError(err)
-			if errors.Is(err, pdu.ErrEncode) {
-				// SMPP v3.4 §2.8 and v5 §3.2.1.3: a local encoding
-				// failure replaces the reply with a header-only error response.
-				// Preserve the handler's request to close after writing the reply.
-				if p.CanResponse() {
-					fallback := p.GetResponse()
-					fallback.SetCommandStatus(data.ESME_RSYSERR)
-					fallback.SetSequenceNumber(p.GetSequenceNumber())
-					if _, fallbackErr := trx.conn.writePDUWithTimeout(headerOnlyResponse{fallback}, s.config.WriteTimeout); fallbackErr != nil {
-						s.reportIOError(fallbackErr)
-						closeBind = true
-					}
+			s.reportResponseError(originalResponse, err)
+			if !errors.Is(err, pdu.ErrEncode) {
+				s.close()
+				return nil, false
+			}
+			// SMPP v3.4 §2.8 and v5 §3.2.1.3: a response that cannot be encoded
+			// is replaced by a header-only error reply, so the request is still
+			// answered. The handler's closeBind decision stands: the bind closes
+			// after the fallback is written when the handler asked for that.
+			if p.CanResponse() {
+				fallback := p.GetResponse()
+				fallback.SetCommandStatus(data.ESME_RSYSERR)
+				fallback.SetSequenceNumber(p.GetSequenceNumber())
+				if _, fallbackErr := trx.conn.writePDUWithTimeout(headerOnlyResponse{fallback}, s.config.WriteTimeout); fallbackErr != nil {
+					s.reportResponseError(fallback, fallbackErr)
+					s.close()
+					return nil, false
 				}
-			} else {
-				closeBind = true
 			}
 		}
 	}
@@ -702,7 +881,7 @@ func (s *serverSession) preparePDU(p pdu.PDU) (pdu.PDU, error) {
 		return nil, s.contextError(err)
 	}
 	copyPDU.ClearOptionalParameters()
-	s.server.reportError(s.contextError(&UnsupportedOptionalParametersError{SystemID: s.systemID, InterfaceVersion: s.interfaceVersion, Stripped: true}))
+	s.server.reportWorkerError(s.contextError(&UnsupportedOptionalParametersError{SystemID: s.systemID, InterfaceVersion: s.interfaceVersion, Stripped: true}))
 	return copyPDU, nil
 }
 

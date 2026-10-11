@@ -18,6 +18,7 @@ import (
 func TestTransmit(t *testing.T) {
 	t.Run("Binding", func(t *testing.T) {
 		auth := nextAuth()
+		var responses atomic.Int32
 		transmitter, err := NewSession(
 			TXConnector(NonTLSDialer, auth),
 			Settings{
@@ -25,6 +26,9 @@ func TestTransmit(t *testing.T) {
 
 				OnPDU: func(p pdu.PDU, _ bool) {
 					t.Logf("%+v\n", p)
+					if _, ok := p.(*pdu.SubmitSMResp); ok {
+						responses.Add(1)
+					}
 				},
 
 				OnSubmitError: func(_ pdu.PDU, err error) {
@@ -49,12 +53,12 @@ func TestTransmit(t *testing.T) {
 
 		err = transmitter.Transmitter().Submit(newSubmitSM(auth.SystemID))
 		require.Nil(t, err)
-
-		time.Sleep(400 * time.Millisecond)
+		await(t, func() bool { return responses.Load() == 1 })
 
 		transmitter.rebind()
 		err = transmitter.Transmitter().Submit(newSubmitSM(auth.SystemID))
 		require.Nil(t, err)
+		await(t, func() bool { return responses.Load() == 2 })
 	})
 
 	errorHandling := func(t *testing.T, trigger func(*transmittable)) {
@@ -104,7 +108,7 @@ func TestTransmit(t *testing.T) {
 
 	t.Run("SubmitErr", func(t *testing.T) {
 		var tr transmittable
-		tr.input = make(chan pdu.PDU, 1)
+		tr.input = make(chan outboundPDU, 1)
 
 		tr.aliveState = 1
 		err := tr.Submit(nil)
@@ -128,7 +132,7 @@ func TestConcurrentSubmitClose(t *testing.T) {
 			},
 
 			OnSubmitError: func(_ pdu.PDU, err error) {
-				t.Fatal(err)
+				require.ErrorIs(t, err, ErrConnectionClosing)
 			},
 
 			OnRebindingError: func(err error) {

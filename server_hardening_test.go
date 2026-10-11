@@ -259,11 +259,14 @@ func TestServerSlotBelongsToOriginalAccount(t *testing.T) {
 	c, g := gatedDial(t, l, true)
 	bindPipe(t, c, pdu.Transceiver, 0x34)
 	waitSignal(t, g.entered)
-	srv.StopSystemID("sys")
+	stopped := make(chan struct{})
+	go func() { srv.StopSystemID("sys"); close(stopped) }()
+	await(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return srv.credStore["sys"] == nil })
 	pipeAccount(t, srv, pdu.Transceiver, time.Second)
 	bindPipe(t, pipeDial(t, l), pdu.Transceiver, 0x34)
 	await(t, func() bool { return len(srv.GetSystemIDStatus("sys")) == 1 })
 	close(g.release)
+	waitSignal(t, stopped)
 	await(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return old.currentSession == 0 })
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
@@ -1032,7 +1035,7 @@ func TestServerTLSBindAndStop(t *testing.T) {
 	}
 }
 
-func TestServerMalformedBoundPDUClosesWithoutWriteDeadline(t *testing.T) {
+func TestServerFramingErrorNacksAndClosesWithoutWriteDeadline(t *testing.T) {
 	srv, l := pipeServer(t, ServerSettings{}, 0)
 	if err := srv.StartSystemID(SystemIDConfig{SystemID: "sys", Password: "pw", MaxSessions: 1}); err != nil {
 		t.Fatal(err)
@@ -1044,6 +1047,10 @@ func TestServerMalformedBoundPDUClosesWithoutWriteDeadline(t *testing.T) {
 	binary.BigEndian.PutUint32(raw[:4], 15)
 	if _, err := c.Write(raw); err != nil {
 		t.Fatal(err)
+	}
+	nack := readWire(t, c)
+	if len(nack) != 16 || int32(binary.BigEndian.Uint32(nack[4:8])) != int32(data.GENERIC_NACK) || binary.BigEndian.Uint32(nack[8:12]) != uint32(data.ESME_RINVCMDLEN) {
+		t.Fatalf("invalid framing response: %x", nack)
 	}
 	await(t, func() bool {
 		srv.mu.Lock()

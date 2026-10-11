@@ -137,6 +137,10 @@ func handleOnClosePduRequest() func(pdu.PDU) {
 
 func handleExpectedPduResponse() func(response gosmpp.Response) {
 	return func(response gosmpp.Response) {
+		if response.Err != nil {
+			fmt.Printf("Malformed response for sequence %d: %v\n", response.GetSequenceNumber(), response.Err)
+			return
+		}
 		switch response.PDU.(type) {
 		case *pdu.UnbindResp:
 			fmt.Println("UnbindResp Received")

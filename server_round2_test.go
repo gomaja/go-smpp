@@ -228,7 +228,7 @@ func TestServerCallbackStopDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, doc := range []string{"OnError callbacks must not call Stop synchronously", "ServerPDUHandler callbacks must not call Stop synchronously"} {
+	for _, doc := range []string{"OnError callbacks may call Stop or StopSystemID to initiate shutdown", "ServerPDUHandler callbacks may call Stop or StopSystemID to initiate shutdown", "an external call joins it"} {
 		if !strings.Contains(string(b), doc) {
 			t.Fatalf("missing callback shutdown contract: %s", doc)
 		}
@@ -262,8 +262,11 @@ func TestServerIntentionalShutdownDoesNotReportStartupError(t *testing.T) {
 	c, g := gatedDial(t, l, false)
 	bindPipe(t, c, pdu.Transceiver, 0x34)
 	waitSignal(t, g.entered)
-	srv.StopSystemID("sys")
+	stopped := make(chan struct{})
+	go func() { srv.StopSystemID("sys"); close(stopped) }()
+	await(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return srv.credStore["sys"] == nil })
 	close(g.release)
+	waitSignal(t, stopped)
 	await(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return len(srv.connections) == 0 })
 	select {
 	case err := <-errs:

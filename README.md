@@ -3,21 +3,21 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/gomaja/go-smpp)](https://goreportcard.com/report/github.com/gomaja/go-smpp)
 [![pkg.go.dev](https://pkg.go.dev/badge/github.com/gomaja/go-smpp.svg)](https://pkg.go.dev/github.com/gomaja/go-smpp)
 
-SMPP (3.4) client and SMSC server library in pure Go.
+SMPP v3.4 client and SMSC server library in pure Go. It manages connections,
+bind exchanges, rebinding, request correlation and session callbacks.
 
-## Installation
-```
+## Installation and versioning
+
+```sh
 go get github.com/gomaja/go-smpp@main
 ```
-
-## Versioning
 
 The module requires Go 1.26 or later and is tested on the Go releases that are
 still supported upstream (currently 1.26 and 1.27); the minimum moves with them.
 
 This module publishes no releases. `main` is the only supported line, and its
-API changes whenever a better design is found, without a deprecation period.
-Go records the commit you build against as a pseudo-version in your `go.mod`;
+API changes whenever a better design is found, without a deprecation period. Go
+records the commit you build against as a pseudo-version in your `go.mod`;
 upgrade by running the command above again.
 
 The former tags `v1.0.0` and `v1.0.1` are retracted, so `go get` warns about
@@ -44,310 +44,739 @@ CodeQL with the `security-extended` and `security-and-quality` suites when the
 findings that were reviewed and accepted are listed in
 `scripts/codeql-accepted.txt`.
 
-## Usage
+Examples are part of the module: the gate builds, vets and tests them with
+`./...`, and runs their tests explicitly, with `-race` in full mode.
 
-### Highlight
+## Client
 
-- go-smpp is written in event-based style and fully manages your SMPP session, connection, error handling, rebinding, and related hooks:
+### Session and settings
+
+Use `TXConnector`, `RXConnector` or `TRXConnector` with `NewSession`. Set
+`Auth.SMSC` to a reachable SMSC endpoint. Full programs are in
+[example/](example/).
 
 ```go
-		trans, err := gosmpp.NewSession(
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"time"
+
+	gosmpp "github.com/gomaja/go-smpp"
+	"github.com/gomaja/go-smpp/pdu"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	auth := gosmpp.Auth{SMSC: "127.0.0.1:2775", SystemID: "esme", Password: "secret"}
+	session, err := gosmpp.NewSession(
 		gosmpp.TRXConnector(gosmpp.NonTLSDialer, auth),
 		gosmpp.Settings{
-			EnquireLink: 5 * time.Second,
-
-			ReadTimeout: 10 * time.Second,
-
-			OnSubmitError: func(_ pdu.PDU, err error) {
-				log.Fatal("SubmitPDU error:", err)
+			EnquireLink: time.Minute, ReadTimeout: 2 * time.Minute,
+			WriteTimeout:     5 * time.Second,
+			OnSubmitError:    func(_ pdu.PDU, err error) { log.Print(err) },
+			OnReceivingError: func(err error) { log.Print(err) },
+			OnRebindingError: func(err error) { log.Print(err) },
+			OnPDU: func(p pdu.PDU, responded bool) {
+				log.Printf("Received %T (responded: %t)", p, responded)
 			},
-
-			OnReceivingError: func(err error) {
-				fmt.Println("Receiving PDU/Network error:", err)
-			},
-
-			OnRebindingError: func(err error) {
-				fmt.Println("Rebinding but error:", err)
-			},
-
-			OnPDU: handlePDU(),
-
-			OnClosed: func(state gosmpp.State) {
-				fmt.Println(state)
-			},
+			OnClosed: func(state gosmpp.State) { log.Print(state.String()) },
 		}, 5*time.Second)
-		if err != nil {
-		  log.Println(err)
-		}
-		defer func() {
-		  _ = trans.Close()
-		}()
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	defer func() { _ = session.Close() }()
+	<-ctx.Done()
+}
 ```
 
-### Examples
+| Setting | Contract |
+| --- | --- |
+| `ReadTimeout` | Must exceed both zero and `EnquireLink` for `NewSession`. |
+| `WriteTimeout` | Bounds transport writes; see [write deadlines](#write-deadlines). |
+| `EnquireLink` | Zero disables automatic keepalives. |
 
-Full client examples are available under [example](https://github.com/gomaja/go-smpp/blob/main/example).
-Set `Auth.SMSC` to a reachable SMSC endpoint before running them.
+The `rebindingInterval` argument to `NewSession` disables automatic rebinding
+when non-positive.
 
-### Session shutdown and request windows
+`Session.IsAlive()` reports liveness. `Session.SessionStatus()` returns the
+typed `SessionActive` / `SessionClosed` status. `Session.GetSystemIDStatus` also
+reports the bind type and connection addresses.
 
-`Session.Close()` rejects further submissions, interrupts transport I/O, stops
-rebinding, and waits for every session worker and callback, including `OnClosed`.
-On explicit shutdown it first attempts an unbind (SMPP v3.4 §4.2), with a
-50-millisecond write deadline. It skips unbind when a write is active or an
-earlier write left a partial frame or a permanent transport error, then
-proceeds with shutdown. Encoding errors still permit graceful unbind. It does
-not wait for unbind_resp.
-`Connection.WritePDU` rejects writes with `ErrConnectionClosing` after shutdown
-begins, a write leaves a partial frame, or a permanent transport error occurs,
-including a writer that was waiting for transport access.
-This also prevents another worker from appending a PDU to an incomplete frame
-while the first write's error callback runs. A zero-byte write timeout leaves
-framing intact and still permits a response before shutdown.
-TLS transport closure may additionally wait for Go's close_notify timeout.
-Concurrent external calls wait for the same completion. Calling `Close()` from
-inside a callback belonging to that session initiates shutdown and returns. The
-same applies when joining would create a wait cycle between instances, such as
-two sessions whose `OnClosed` callbacks close each other. In either case, the calling
-callback and other callbacks already running may finish afterward, and queued
-submission errors, pending-request completion and store-error callbacks, and
-`OnClosed` may still run during cleanup. Other callbacks due from in-flight
-processing or rebinding may also begin before cleanup finishes. The calling
-callback must return. A subsequent external call waits for cleanup. A call from
-another instance's callback also waits unless it would complete a wait cycle.
-Cycle detection considers every worker in the owning Session or Server. Closing
-`Session.Transceiver()` or stopping one server account can therefore return
-without joining when a different worker in that same Session or Server closes
-the cycle, even if the selected connection could finish independently.
-Goroutines started by the application are external callers; their own waits are
-not tracked. The same contract applies to server `Stop()` and
-`StopSystemID()` for the connections they stop. `OnClosed(ExplicitClosing)` runs
-once even when automatic rebinding is enabled; explicit shutdown never rebinds.
+#### Write deadlines
 
-Client bind exchanges use `DefaultBindTimeout` (30 seconds), covering both the
-bind write and response read. Set `WithBindTimeout(duration)` on TX, RX or TRX
-connectors to change it; non-positive values use the default. Successful exchanges
-clear this deadline before session I/O. Built-in connectors also expose
-`ConnectContext(context.Context)`, which session rebinding uses to interrupt bind
-I/O on shutdown. A custom connector without that method must return from
-`Connect()` before external `Close()` can finish. `Dialer.DialContext` accepts a
-context; the built-in TCP dialer uses `net.Dialer.DialContext` and shutdown joins
-that dial. Custom dialers should
-honor cancellation. If one ignores it, the connector abandons that attempt and
-closes a late connection; its dialing goroutine remains until the function
-returns, although session shutdown completes without waiting for it.
-During binding, both the client and server answer enquire_link and continue
-waiting under the original bind deadline (SMPP v5 §2.4 Table 2-1 permits it in
-Open; v3.4 §2.3 Table 2-1 lists it only in bound states). The server ignores
-generic_nack while awaiting the first bind. On the client, a
-generic_nack with the bind sequence or sequence zero fails with `BindError`
-carrying the peer's status (SMPP v3.4 §4.3.1).
-The server permits at most eight pre-bind control PDUs in total: enquire_link,
-generic_nack and unknown commands. A ninth closes the connection, and these
-exchanges never extend the bind deadline. Unknown commands receive generic_nack
-with `ESME_RINVCMDID` before the server continues waiting. A malformed bind
-receives its matching header-only bind response with the decode status, then
-closes; lost framing receives generic_nack with `ESME_RINVCMDLEN`, then closes.
-For interoperability, the server tolerates a nonzero request command_status;
-authentication alone determines the bind response status. The same Connection
-uses raw reads throughout the handshake and allocates its 128 KiB read buffer
-only on the first buffered Read after binding. Idle unauthenticated connections
-therefore retain no read buffer. Unknown-command diagnostics report the first
-occurrence immediately and one aggregate when the handshake ends, with counts
-for enquiries, generic nacks and unknown commands (including the rejected ninth
-control). Intentional shutdown suppresses the final aggregate.
+A positive `WriteTimeout` bounds transport writes. A non-positive value leaves
+ordinary writes without a deadline; protocol error and close-path responses use
+a 30-second fallback. Explicit shutdown attempts unbind with a 50-millisecond
+deadline regardless of `WriteTimeout`.
 
-Window entries are reserved during `Submit`, before queue admission and writing,
-and removed independently of response callbacks. Reusing an outstanding sequence
-returns `ErrSequenceInUse` without replacing its request or sending another PDU.
-`TimeSent` records reservation time and is available even to an immediate response;
-`WrittenAt` records completed writing. A reservation becomes eligible for response
-correlation immediately before its transport write begins. A response to a request
-still waiting for admission goes to `OnUnexpectedPduResponse` and preserves the
-reservation. Pending writes have zero `WrittenAt` and
-cannot expire; expiry measures age from `WrittenAt`. `generic_nack` completes its matching entry. Each reservation belongs
-to its sending connection and session lineage; exactly one response, expiry or close operation may
-complete it. Conditional removal and the local ledger arbitrate completion. A
-response that finds its row already removed can complete the local request if
-expiry has not claimed it yet. Store operations have bounded deadlines; application
-callbacks consume none of that deadline. Close bounds backend cleanup by one
-`StoreAccessTimeOut`, with up to eight concurrent deletions and a fresh deadline
-for each operation, limited by the remaining budget. It completes every locally
-owned transmitted request that has not already completed or been abandoned,
-even when the backend budget ends or List omits the row. `OnClosePduRequest`
-runs before an external Close returns. Unfinished row cleanup retains its exact
-identity for later silent recovery without occupying local window capacity.
-Final Close has no background-scan lookup-count cap. The pre-write capacity check and
-reservation share a store budget; the written marker gets a fresh budget after
-transport I/O. Only written, unanswered application requests count against
-`MaxWindowSize`; queued reservations do not. Tracked enquire_link bypasses that
-limit and remains correlated. The next application or automatic enquiry retires
-the previous unanswered application enquiry without a completion callback, keeping
-at most one written application enquiry outstanding per connection. Its late
-response is unexpected. Automatic keepalives always bypass the request store;
-their responses use `OnUnexpectedPduResponse` when tracking is enabled. An error
-retiring a previous enquiry reaches `OnReceivingError` and does not prevent the
-keepalive from being sent. A live connection may expire reservations left
-by a dead generation of the same session. Failed cleanup and a full window
-trigger asynchronous recovery; ordinary writes do not scan and the writer never
-waits for a scan. At most one scan runs at a time, with attempts limited to once
-per `ExpireCheckTimer`, or once per second when that timer is disabled. A joined
-helper invokes `OnClosePduRequest` away from the writer, so the callback can
-resubmit. Each scan bounds backend work by one `StoreAccessTimeOut` and performs
-at most 256 absence lookups across eligible lineages. Healthy scans start with
-own-lineage lookups; when both own and foreign cleanup need lookups, each gets
-up to half that count. After a scan exhausts its time budget, the next scan
-rotates its starting phase, so own lookups, List cleanup and closed-lineage
-lookups each get a fresh budget within three such scans. Each operation may use
-the full remaining budget. List cleanup uses up to eight concurrent operations.
-Identity, List-row, phase and background-lineage cursors survive rebinds and let
-later scans proceed past unavailable rows. Periodic
-checks also find finally closed lineages on the same store, even without a new
-submission or an own-lineage hint. Recovery runs with expiry disabled. Expiry
-checks shutdown before each backend operation and cancels in-progress operations
-so Close does not wait for one timeout per expired row.
-Sessions sharing a store share window capacity, but each session reports only
-its own requests, including across rebinds. Once another session has completed
-shutdown, its unrecoverable store entries may be removed silently. Capacity
-checks are advisory across concurrent writers and while a backend metadata
-update is unavailable. A fully written PDU whose `MarkWritten` update fails is
-reported through `OnReceivingError`; the connection stays usable and recovery
-retries the marker conditionally. A store Get deadline or
-Delete error releases local written capacity and admission immediately because
-the response has arrived. It reaches `OnReceivingError`; the exact reservation
-is retained only for silent cleanup and no response/expiry/close callback follows.
-A successful Get returning a row remains usable even if its deadline just
-elapsed. A missing row without a store deadline instead completes through the
-local ledger; response and expiry still deliver at most one completion callback.
-Failed admissions are resolved when a bounded Get confirms their identity is
-absent or has been replaced, so a Set that never committed cannot retain a
-permanent cleanup hint. The most recent 1024 rejected identities remain as small
-tombstones after absence settlement, so a late-committing Set is removed silently
-during close or recovery. This retention is bounded: older rejections and rows
-committed after final cleanup may require administrative removal.
-Each session lineage retains at most 1024 uncertain
-cleanup identities; healthy queued and admission-waiting requests, successful
-cancellation rollbacks and identities retained after a close completion do not
-consume that bound. Abandonment suppresses completion for as long as its local
-cleanup identity remains, even after a small replay tombstone is evicted. Further
-tracked submissions return `ErrRequestCleanupFull` and trigger throttled recovery
-until space is reclaimed; automatic keepalives remain independent of this bound. Zero `PduExpireTimeOut` disables expiry. Inbound
-requests use `OnAllPDU`, `OnPDU` or the default response path when the window's
-`OnReceivedPduRequest` is nil. A malformed response is
-reported through `OnReceivingError` and, when correlated, through
-`OnExpectedPduResponse` with `Response.Err` set and a non-nil response containing
-the received header. Check `Err` before treating it as a successful response.
-A generic_nack rejecting one of our responses can share a sequence with an
-unrelated outstanding request and complete that request: the peer's sequence
-space overlaps ours, and generic_nack carries no rejected command ID.
+### Callbacks
+
+`OnPDU` observes received PDUs and reports whether a reply was automatic.
+`OnAllPDU` takes precedence over `OnPDU` and returns a manual reply and
+`closeBind` decision. With window tracking, response callbacks are separate;
+inbound requests use `OnReceivedPduRequest`, or these handlers and the default
+response path when it is nil. `OnRebind` reports a successful rebind.
+
+The default client path answers enquire_link and unbind. When `OnAllPDU` handles
+a request, or `OnReceivedPduRequest` runs without `EnableAutoRespond`, the
+callback must return those replies itself. Server housekeeping follows its own
+[bind-state rules](#bind-state-matrix).
 
 Every accepted outbound PDU that cannot be written reaches `OnSubmitError`,
 including queued PDUs discarded during shutdown. Such discarded submissions
 carry `ErrConnectionClosing`. A successful `Submit` means queued, not written;
-rejected submissions return their error directly. Reservations also include
-queued submissions and callers waiting for queue admission. A canceled admission
-removes its reservation and produces no completion callback. Calling `Submit` or
-`SubmitContext` from the connection's own writer callback returns
-`ErrSubmitQueueFull` when its queue is full. A blocking admission also returns
-that error if it would complete a callback wait cycle with another instance;
-otherwise callers retain queue backpressure. Queue waits register their
-dependency until admission, cancellation or shutdown releases it.
-Queue admission commits under the shutdown lock. A producer still waiting when
-shutdown begins returns `ErrConnectionClosing`, even if the writer frees a queue
-slot during cleanup; rejected submissions produce no completion callback.
-Canceling a producer that was woken for an available slot passes that notification
-to another waiter, so cancellation cannot strand a live producer.
-Application submissions also wait for a window admission permit before queueing;
-at most `MaxWindowSize` application requests are admitted until completion.
+rejected submissions return their error directly without invoking
+`OnSubmitError` or a request-completion callback.
+
+### Close and the callback contract
+
+`Session.Close()` rejects further submissions, interrupts transport I/O, stops
+rebinding, and waits for every session worker and callback, including
+`OnClosed`. On explicit shutdown it first attempts an unbind (SMPP v3.4 §4.2),
+with a 50-millisecond write deadline. It skips unbind when a write is active or
+an earlier write left a partial frame or a permanent transport error, then
+proceeds with shutdown.
+
+Encoding errors still permit graceful unbind. `Close` does not wait for
+unbind_resp. `Connection.WritePDU` rejects writes with `ErrConnectionClosing`
+after shutdown begins, a write leaves a partial frame, or a permanent transport
+error occurs, including a writer that was waiting for transport access.
+
+This also prevents another worker from appending a PDU to an incomplete frame
+while the first write's error callback runs. A zero-byte write timeout leaves
+framing intact and still permits a response before shutdown. TLS transport
+closure may additionally wait for Go's close_notify timeout.
+
+Concurrent external calls wait for the same completion. Calling `Close()` from
+inside a callback belonging to that session initiates shutdown and returns. The
+same applies when joining would create a wait cycle between instances, such as
+two sessions whose `OnClosed` callbacks close each other.
+
+In either case, the calling callback and other callbacks already running may
+finish afterward, and queued submission errors, pending-request completion and
+store-error callbacks, and `OnClosed` may still run during cleanup. Other
+callbacks due from in-flight processing or rebinding may also begin before
+cleanup finishes. The calling callback must return.
+
+A subsequent external call waits for cleanup. A call from another instance's
+callback also waits unless it would complete a wait cycle. Cycle detection
+considers every worker in the owning Session or Server.
+
+Closing `Session.Transceiver()` or stopping one server account can therefore
+return without joining when a different worker in that same Session or Server
+closes the cycle, even if the selected connection could finish independently.
+Goroutines started by the application are external callers; their own waits are
+not tracked. The same contract applies to server `Stop()` and `StopSystemID()`
+for the connections they stop.
+
+`OnClosed(ExplicitClosing)` runs once even when automatic rebinding is enabled;
+explicit shutdown never rebinds.
+
+### Binding and rebind
+
+Client bind exchanges use `DefaultBindTimeout` (30 seconds), covering both the
+bind write and response read. Set `WithBindTimeout(duration)` on TX, RX or TRX
+connectors to change it; non-positive values use the default. Successful
+exchanges clear this deadline before session I/O.
+
+Built-in connectors also expose `ConnectContext(context.Context)`, which session
+rebinding uses to interrupt bind I/O on shutdown. A custom connector without
+that method must return from `Connect()` before external `Close()` can finish.
+`Dialer.DialContext` accepts a context; the built-in TCP dialer uses
+`net.Dialer.DialContext` and shutdown joins that dial.
+
+Custom dialers should honor cancellation. If one ignores it, the connector
+abandons that attempt and closes a late connection; its dialing goroutine
+remains until the function returns, although session shutdown completes without
+waiting for it.
+
+During binding, both the client and server answer enquire_link and continue
+waiting under the original bind deadline (SMPP v5 §2.4 Table 2-1 permits it in
+Open; v3.4 §2.3 Table 2-1 lists it only in bound states). The server ignores
+generic_nack while awaiting the first bind. On the client, a generic_nack with
+the bind sequence or sequence zero fails with `BindError` carrying the peer's
+status (SMPP v3.4 §4.3.1).
+
+### Request window
+
+Enable `WindowedRequestTracking` for TX/TRX correlation. Set a positive
+`StoreAccessTimeOut` and nonzero `MaxWindowSize` (at most 255). With positive
+`PduExpireTimeOut`, set a positive `ExpireCheckTimer`; non-positive timers
+disable expiry checks, and zero expiry disables expiration. `WithRequestStore`
+replaces the default in-memory store.
+
+#### Store contract
+
+| Store method | Required behavior |
+| --- | --- |
+| `Set(ctx, request)` | Atomically insert only an absent sequence; preserve an existing row and return `ErrSequenceInUse`. A failed `Set` is followed by conditional cleanup in case insertion committed before acknowledgement failed. |
+| `Get` / `List` | Preserve reservation metadata. `List` should be complete, but stale or truncated snapshots are supported for uncertain cleanup; recovery confirms identities with `Get`. |
+| `Delete(ctx, request)` | Atomically compare sequence, `Owner` and `ID`, then remove. Timestamps do not define identity. `false, nil` means absent or replaced. The local ledger also arbitrates completion; removal alone does not authorize a callback. |
+| `MarkWritten(ctx, request, sentAt)` | Set `WrittenAt` only on the matching pending reservation. Return `false, nil` for removed/replaced entries; never recreate one. |
+| `WrittenLength(ctx, excludeOwner)` | Count written application requests, excluding enquire_link and the specified nonzero owner; zero includes all owners. Update atomically with `Set`, `MarkWritten`, `Delete` and `Clear`. |
+| `Length` | Count all reservations. |
+| `Clear` | Administrative operation, only after all owning sessions have closed. |
+
+Store operations must be safe concurrently and respect context cancellation.
+Cache eviction must not discard outstanding reservations: entries live until
+explicit removal. Preserve `Owner`, `ID`, `Lineage`, `TimeSent` and `WrittenAt`
+through storage and serialization. A session keeps its lineage through rebinds.
+`Get` returns false only for absence or a canceled context; a canceled `List`
+snapshot cannot establish absence. Live completion must use the library arbiter.
+Before directly removing or clearing library-owned reservations, close every
+session using that store; direct removal otherwise invalidates the completion
+and admission ledger. Session cleanup conditionally deletes only reservations it
+owns. The writer adds its local written count to `WrittenLength`, so a failed
+metadata update cannot erase capacity usage.
+
+A store may be shared by sessions in one process; `Owner`, `Lineage` and `ID`
+use counters seeded with a random 64-bit process prefix at startup, with a
+time/process-ID fallback if the entropy reader fails. Collisions between
+processes or restarts are negligible. Silent foreign cleanup requires an exact
+sequence and reservation ID retained in a known, finally closed local owner's
+ledger; an unknown process's rows are preserved.
+
+Separate backend namespaces per process remain recommended: capacity and
+sequence numbers are shared, and one process cannot reclaim another process's
+rows after it exits. For absence recovery across local Sessions, reuse the same
+store instance (a pointer implementation or comparable value such as
+DefaultStore), rather than separate wrappers around one backend. Comparability
+is checked on the dynamic value, including nested interfaces. Non-comparable
+decorators are safe to use and retain own-lineage recovery, but cannot establish
+backend identity for absence settlement across lineages. Close also settles
+uncertain identities whose rows were never inserted; if its reads fail, a later
+Session on that store can confirm absence silently.
+
+Settling the final identity of a closed lineage also clears its abandoned
+markers and recovery hint. Retries rejected by a retained sequence still trigger
+rate-limited recovery, so recovery does not require a successful new submission.
+
+#### Correlation and completion
+
+Window entries are reserved during `Submit`, before queue admission and writing,
+and removed independently of response callbacks. Reusing an outstanding sequence
+returns `ErrSequenceInUse` without replacing its request or sending another PDU.
+`TimeSent` records reservation time and is available even to an immediate
+response; `WrittenAt` records completed writing.
+
+A reservation becomes eligible for response correlation immediately before its
+transport write begins. A response to a request still waiting for admission goes
+to `OnUnexpectedPduResponse` and preserves the reservation. Pending writes have
+zero `WrittenAt` and cannot expire; expiry measures age from `WrittenAt`.
+
+`generic_nack` completes its matching entry. Each reservation belongs to its
+sending connection and session lineage; exactly one response, expiry or close
+operation may complete it. Conditional removal and the local ledger arbitrate
+completion. A successful removal must also claim the ledger before invoking a
+callback. A response that finds its row absent can claim the local request
+before expiry does; only the winning path delivers completion. Failed cleanup
+cannot abandon a completion another path has already claimed. Store operations
+have bounded deadlines; application callbacks consume none of that deadline.
+
+A successful response-path Get returning a row remains usable even if its
+deadline has just elapsed. A missing row without a store deadline instead
+completes through the local ledger. A Get deadline or Delete error releases
+local written capacity and admission immediately because the response has
+arrived. It reaches `OnReceivingError`; an unclaimed reservation becomes
+abandoned, retaining its exact identity only for silent cleanup, with no
+response/expiry/close callback afterward.
+
+A malformed response is reported through `OnReceivingError` and, when
+correlated, through `OnExpectedPduResponse` with `Response.Err` set and a
+non-nil response containing the received header. Check `Err` before treating it
+as a successful response. A generic_nack rejecting one of our responses can
+share a sequence with an unrelated outstanding request and complete that
+request: the peer's sequence space overlaps ours, and generic_nack carries no
+rejected command ID.
+
+#### Capacity and enquire_link
+
+`SubmitContext` reserves a request under its own store-access budget before
+admission. The pre-write capacity check uses a separate budget; marking a
+successful write gets a fresh budget after transport I/O. Only written,
+unanswered application requests count against `MaxWindowSize`; queued
+reservations do not. Tracked enquire_link bypasses that limit and remains
+correlated.
+
+The next application or automatic enquiry retires the previous unanswered
+application enquiry without a response, expiry or close completion callback,
+keeping at most one written application enquiry outstanding per connection. Its
+late response is unexpected. Automatic keepalives always bypass the request
+store; their responses use `OnUnexpectedPduResponse` when tracking is enabled.
+An error retiring a previous enquiry reaches `OnReceivingError` and does not
+prevent the keepalive from being sent.
+
+#### Recovery
+
+A live connection may expire reservations left by a dead generation of the same
+session. Failed cleanup and a full window trigger asynchronous recovery;
+ordinary writes do not scan and the writer never waits for a scan.
+
+At most one scan runs at a time, with attempts limited to once per
+`ExpireCheckTimer`, or once per second when that timer is disabled. A joined
+helper invokes `OnClosePduRequest` away from the writer when conditional
+deletion and the local ledger both grant completion, so the callback can
+resubmit. Recovery runs whether or not expiry is enabled.
+
+Each scan bounds backend work by one `StoreAccessTimeOut`, with at most 256 Get
+calls for cleanup identities across eligible lineages. Healthy scans start with
+own-lineage lookups; when both own and finally closed foreign lineages need
+lookups, each receives up to half the count. After a scan exhausts its time
+budget, the next rotates its starting phase: own lookups, List cleanup and
+closed-lineage lookups each get a fresh budget within three such scans. Every
+operation has a fresh deadline limited by the remaining scan budget; List
+cleanup uses up to eight concurrent operations.
+
+Identity, List-row, phase and background-lineage cursors survive rebinds,
+letting later scans proceed past unavailable rows. Periodic checks find finally
+closed lineages on the same comparable store even without a new submission or an
+own-lineage hint. Their local registry supplies a shared cleanup hint until the
+final identity is settled.
+
+Recovery confirms each uncertain identity with Get and conditionally deletes a
+matching row even when List omitted it. Outstanding-generation accounting
+preserves the recovery hint when List fails quickly with no rows or reaches its
+deadline. Expiry checks shutdown before each backend operation and cancels
+operations in progress, leaving unfinished requests for close or recovery
+instead of making Close wait one timeout per expired row.
+
+Sessions sharing a store share window capacity, but each session reports only
+its own requests, including across rebinds. Once another session has completed
+shutdown, its unrecoverable store entries may be removed silently. Capacity
+checks are advisory across concurrent writers and while a backend metadata
+update is unavailable.
+
+A fully written PDU whose `MarkWritten` update fails is reported through
+`OnReceivingError`; the connection stays usable and recovery retries the marker
+conditionally.
+
+Failed admissions are resolved when a bounded Get confirms their identity is
+absent or has been replaced, so a Set that never committed cannot retain a
+permanent cleanup hint. The most recent 1024 rejected identities remain as small
+tombstones after absence settlement, so a late-committing Set is removed
+silently during close or recovery. This retention is bounded: older rejections
+and rows committed after final cleanup may require administrative removal.
+
+Each session lineage retains at most 1024 uncertain cleanup identities. Healthy
+queued and admission-waiting requests, successful cancellation rollbacks and
+identities retained after a close completion do not count toward that bound.
+Abandonment suppresses completion while its local cleanup identity remains, even
+after a replay tombstone is evicted. Further tracked submissions return
+`ErrRequestCleanupFull` and trigger throttled recovery until space is reclaimed;
+automatic keepalives remain independent of this bound.
+
+#### Close and store flush
+
+Close bounds backend cleanup by one `StoreAccessTimeOut`, with up to eight
+concurrent deletions. Every operation gets a fresh deadline limited by the
+remaining budget; final Close has no background-scan Get-count cap. The budget
+excludes local bookkeeping, store-error reporting and callbacks.
+
+Every locally owned transmitted request that has not completed or been abandoned
+reaches `OnClosePduRequest`, even if List omits its row or the backend budget
+expires. Store errors and callbacks run after the backend phase; an external
+Close joins them. Unfinished cleanup retains its exact identity for later silent
+recovery without occupying local window capacity or counting toward the
+uncertain-identity limit. Completed or abandoned requests never gain completion
+ownership again.
+
+#### Queue admission and permits
+
+Reservations also include queued submissions and callers waiting for queue
+admission. Cancellation attempts conditional deletion and produces no completion
+callback; only a failed rollback consumes uncertain cleanup capacity. Calling
+`Submit` or `SubmitContext` from the connection's own writer callback returns
+`ErrSubmitQueueFull` when its queue is full.
+
+A blocking admission also returns that error if it would complete a callback
+wait cycle with another instance; otherwise callers retain queue backpressure.
+Queue waits register their dependency until admission, cancellation or shutdown
+releases it. Queue admission commits under the shutdown lock.
+
+A producer still waiting when shutdown begins returns `ErrConnectionClosing`,
+even if the writer frees a queue slot during cleanup. Canceling a producer that
+was woken for an available slot passes that notification to another waiter, so
+cancellation cannot strand a live producer. Application submissions also wait
+for a window admission permit before queueing; at most `MaxWindowSize`
+application requests are admitted until completion.
+
 Reserved requests still waiting for admission consume no permit. This keeps
 producers from outrunning responses and makes a full window exert backpressure.
-Enquire_link bypasses admission permits. A callback on any library worker
-cannot wait for a full application window and receives `ErrSubmitQueueFull`,
-including when it forwards into another Session. Waiting for a silent peer
-from a callback could otherwise prevent shutdown from completing. Application
-goroutines spawned by callbacks retain ordinary admission backpressure. `SubmitContext` cancellation
-also bounds waiting for a window permit. `GetWindowSize` reports written,
-unanswered application requests, excluding queued reservations and enquire_link.
-Encoding errors affect only
-the offending PDU and leave the connection usable.
-An unencodable handler response is reported and replaced with a matching,
-header-only `ESME_RSYSERR` response using the request sequence; the handler's
-`closeBind` decision still applies. Malformed alert_notification body fields are
-reported without a reply, since that command has no response (v3.4 §2.8).
+Enquire_link bypasses admission permits.
 
-## SMPP server
+A callback on any library worker cannot wait for a full application window and
+receives `ErrSubmitQueueFull`, including when it forwards into another Session.
+Waiting for a silent peer from a callback could otherwise prevent shutdown from
+completing. Application goroutines spawned by callbacks retain ordinary
+admission backpressure.
 
-Register ESME accounts and start a TCP listener. Empty `BindingTypes` permits
-TX, RX and TRX; zero `MaxSessions` is unlimited. Zero timeouts disable deadlines.
+`SubmitContext` cancellation also bounds waiting for a window permit.
+`GetWindowSize` reports written, unanswered application requests, excluding
+queued reservations and enquire_link.
+
+In `OnClosePduRequest` and `OnRebind`, hand retry work to an application
+goroutine or application-owned queue and return. That goroutine can call
+`SubmitContext` with an application deadline. The returned
+`Transceiver`/`Transmitter` interface exposes `Submit`; obtain context
+submission with a type assertion to `interface { SubmitContext(context.Context,
+pdu.PDU) error }`. Always check the return value.
+
+### TLS
+
+Supply a context-aware TLS dialer through `DialerFunc`, for example:
 
 ```go
-server := gosmpp.NewServer(gosmpp.ServerSettings{
-    Address: "127.0.0.1:2775",
-    SystemID: "smsc",
-    OnError: func(err error) { log.Print(err) },
-})
-err := server.StartSystemID(gosmpp.SystemIDConfig{
-    SystemID: "esme",
-    Password: "secret",
-    MaxSessions: 4,
-    OnPDU: func(session gosmpp.ServerSessionInfo, request pdu.PDU) (pdu.PDU, bool) {
-        if submit, ok := request.(*pdu.SubmitSM); ok {
-            response := submit.GetResponse().(*pdu.SubmitSMResp)
-            response.MessageID = "message-1"
-            return response, false
-        }
-        return nil, false
-    },
-})
-if err != nil { log.Fatal(err) }
-if err = server.Start(); err != nil { log.Fatal(err) }
-defer server.Stop()
+package main
 
-// Delivery requires a live receiver or transceiver session.
-ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-defer cancel()
-err = server.SubmitToSystemID(ctx, "esme", pdu.NewDeliverSM())
-if err != nil { log.Print(err) }
+import (
+	"context"
+	"crypto/tls"
+	"net"
+
+	gosmpp "github.com/gomaja/go-smpp"
+)
+
+func main() {
+	dialer := gosmpp.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
+		return (&tls.Dialer{Config: &tls.Config{ServerName: "smsc.example"}}).DialContext(ctx, "tcp", addr)
+	})
+	_ = gosmpp.TRXConnector(dialer, gosmpp.Auth{SMSC: "smsc.example:2775"})
+}
 ```
 
-`Addr()` reports the listener address, including an assigned ephemeral port.
-Set `TLSConfig` to a `*tls.Config` with certificates, `GetCertificate`, or
+## Server
+
+### Settings, accounts and handler
+
+Register ESME accounts and start a TCP listener. Empty `BindingTypes` permits
+TX, RX and TRX; zero `MaxSessions` is unlimited. A non-positive account
+`ReadTimeout` disables its read deadline; a positive value must exceed
+`EnquireLink`. Account write timeouts follow [write
+deadlines](#write-deadlines). Non-positive bind timeouts use
+`DefaultBindTimeout`. Construct the server with `NewServer`; a zero-value server
+returns `ErrServerNotInitialized` from operations, exposes empty accessor values
+and treats shutdown as a no-op.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"time"
+
+	gosmpp "github.com/gomaja/go-smpp"
+	"github.com/gomaja/go-smpp/pdu"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	server := gosmpp.NewServer(gosmpp.ServerSettings{
+		Address: "127.0.0.1:2775", SystemID: "smsc",
+		OnError: func(err error) { log.Print(err) },
+	})
+	defer server.Stop()
+	if err := server.StartSystemID(gosmpp.SystemIDConfig{
+		SystemID: "esme", Password: "secret", MaxSessions: 4,
+		ReadTimeout: 2 * time.Minute, WriteTimeout: 5 * time.Second,
+		EnquireLink: time.Minute,
+		OnPDU: func(_ gosmpp.ServerSessionInfo, request pdu.PDU) (pdu.PDU, bool) {
+			log.Printf("Received %T", request)
+			if submit, ok := request.(*pdu.SubmitSM); ok {
+				response := submit.GetResponse().(*pdu.SubmitSMResp)
+				response.MessageID = "message-1"
+				return response, false
+			}
+			if request.CanResponse() {
+				return request.GetResponse(), false
+			}
+			return nil, false
+		},
+	}); err != nil {
+		log.Print(err)
+		return
+	}
+	if err := server.Start(); err != nil {
+		log.Print(err)
+		return
+	}
+	log.Printf("Listening on %s", server.Addr())
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			delivery := pdu.NewDeliverSM().(*pdu.DeliverSM)
+			if err := delivery.Message.SetMessageWithEncoding("Hello from SMSC", nil); err != nil {
+				log.Print(err)
+				continue
+			}
+			// Success means queued; deliver_sm_resp carries the ESME's result.
+			deadline, stop := context.WithTimeout(ctx, time.Second)
+			err := server.SubmitToSystemID(deadline, "esme", delivery)
+			stop()
+			if err != nil {
+				log.Print(err)
+			}
+		}
+	}
+}
+```
+
+`Addr()` reports the listener address, including an assigned ephemeral port. Set
+`TLSConfig` to a `*tls.Config` with certificates, `GetCertificate`, or
 `GetConfigForClient` to accept TLS connections; the bind timeout also covers TLS
-handshaking. `SystemID` is the SMSC identifier
-returned to peers and may contain at most 15 octets, excluding the terminator.
+handshaking. `SystemID` is the SMSC identifier returned to peers and may contain
+at most 15 octets, excluding the terminator.
+
 ESME credential lengths are left to deployments.
 
-The server always handles enquire_link, unbind and repeated binds. It checks
-inbound PDUs against the bind state before calling `OnPDU`, rejecting disallowed
-requests with `ESME_RINVBNDSTS` and dropping disallowed responses. The handler
-receives `data_sm` only on TX/TRX binds and `data_sm_resp` only on RX/TRX binds
-(SMPP v3.4 §§2.5–2.6; v5 §2.4 Table 2-1). It
-receives a `ServerSessionInfo` value identifying the account, bind type, protocol
-version and addresses. Without a handler, permitted requests receive
-`ESME_RSYSERR` and responses are discarded. A handler returning `closeBind` closes after its response is
-written. `StopSystemID` removes an account and closes its connections, while
-`Stop()` closes all connections. External shutdown calls wait for handlers and
-cleanup; calls inside callbacks initiate shutdown as described above. A stopped
-server cannot restart.
+The server permits at most eight pre-bind control PDUs in total: enquire_link,
+generic_nack and unknown commands. A ninth closes the connection, and these
+exchanges never extend the bind deadline. Unknown commands receive generic_nack
+with `ESME_RINVCMDID` before the server continues waiting. Other known requests
+received before the bind, such as unbind, close the connection without a
+response.
+
+A malformed bind receives its matching header-only bind response with the decode
+status, then closes; lost framing receives generic_nack with `ESME_RINVCMDLEN`,
+then closes. For interoperability, the server tolerates a nonzero request
+command_status; authentication and admission determine the bind response status.
+A binding type outside the account allow-list or an exhausted `MaxSessions`
+limit returns `ESME_RBINDFAIL`. The same Connection uses raw reads throughout
+the handshake and allocates its 128 KiB read buffer only on the first buffered
+Read after binding.
+
+Idle unauthenticated connections therefore retain no read buffer.
+Unknown-command diagnostics report the first occurrence immediately and one
+aggregate when the handshake ends, with counts for enquiries, generic nacks and
+unknown commands (including the rejected ninth control). Intentional shutdown
+suppresses the final aggregate. `ServerBindError` exposes rejection status and
+safe connection metadata through `OnError`, without the bind password.
+
+The handler receives a `ServerSessionInfo` value identifying the account, bind
+type, protocol version and addresses. Without a handler, permitted requests
+receive `ESME_RSYSERR` and responses are discarded.
+
+A handler returning `closeBind` closes after its response is written.
+
+### SubmitToSystemID
 
 `GetSystemIDStatus` includes the bind type and typed `SessionActive` or
 `SessionClosed` status. `SystemIDs` lists accounts with bound sessions.
 Submission success means queued, not delivered; track `deliver_sm_resp` to learn
-the ESME's result. The context bounds waiting for queue capacity, not a later
-socket write. PDUs with optional parameters require a live v3.4-or-later RX/TRX
-session; otherwise `SubmitToSystemID` returns
-`*gosmpp.UnsupportedOptionalParametersError` without sending. Handler responses
-to older peers have optional parameters stripped, with a diagnostic in `OnError`.
-Write failures also reach `OnError` with account and remote address context.
-Use `errors.As(err, &submitError)` with `*gosmpp.SubmitError` to identify the PDU
+the ESME's result.
+
+Delivery requires a live RX/TRX session; otherwise `SubmitToSystemID` returns
+`ErrNoLiveSession`. PDUs with optional parameters also require v3.4 or later.
+When live RX/TRX sessions exist but none accepts TLVs, submission returns
+`*gosmpp.UnsupportedOptionalParametersError` without sending. The context bounds
+waiting for queue capacity, not a later socket write. Handler responses to older
+peers have optional parameters stripped, with a diagnostic in `OnError`.
+
+Write failures also reach `OnError` with account and remote address context. Use
+`errors.As(err, &submitError)` with `*gosmpp.SubmitError` to identify the PDU
 that failed; its `Err` unwraps to the underlying error. This also covers queued
 PDUs discarded when a connection closes.
+
 Submitting a delivery receipt inside `OnPDU` for the message being handled can
 put that receipt on the wire before the handler's `submit_sm_resp`; applications
 requiring response-first ordering must coordinate it themselves.
-See [specification compliance](docs/spec-compliance.md).
+
+### Bind-state matrix
+
+The server checks the ESME-issued operation before invoking the handler (SMPP
+v3.4 §2.3 Table 2-1, §§2.5–2.7; v5 §2.4 Table 2-1).
+
+| Inbound operation | TX | RX | TRX |
+| --- | --- | --- | --- |
+| submit_sm, submit_multi, query_sm, cancel_sm, replace_sm, data_sm | Yes | No | Yes |
+| deliver_sm_resp, data_sm_resp | No | Yes | Yes |
+| generic_nack, enquire_link_resp, unbind_resp | Yes | Yes | Yes |
+| enquire_link, unbind, repeated binds | Library handles | Library handles | Library handles |
+| Other ESME-issued PDUs | No | No | No |
+
+Server handlers cannot override the operations marked "Library handles".
+Disallowed requests receive a matching header-only `ESME_RINVBNDSTS` response;
+disallowed responses are dropped.
+
+### Shutdown
+
+`StopSystemID` removes an account and closes its connections, while `Stop()`
+closes all connections. External shutdown calls wait for handlers and cleanup;
+calls inside callbacks initiate shutdown as described above. A stopped server
+cannot restart.
+
+`Stop` also closes the listener and handshaking connections. See the [callback
+contract](#close-and-the-callback-contract) for reentrant calls and wait cycles.
+
+## PDUs and codings
+
+### Receive and send policy
+
+Marshal and transports check wire representability, allowing over-limit received
+fields to be forwarded. Call `pdu.Validate(p)` for all SMPP v3.4 mandatory-field
+maxima; its joined `*pdu.ValidationError` values identify fields and suggested
+response statuses. Setters enforce their construction limits.
+
+See [Policies](docs/spec-compliance.md#policies) for the full receive/send
+table.
+
+Address does not know its containing PDU; call `pdu.Validate` before sending to
+enforce the per-PDU 21/65-octet limits (including NUL). Address setters accept
+up to 64 content octets for every PDU, and Marshal preserves them. An address
+accepted by the setter can exceed submit_sm's maximum and be rejected by a
+strict SMSC.
+
+This allows a transit SMSC to forward accepted traffic.
+
+`pdu.Validate` does not enforce time syntax or the exact 1-or-17-octet time size
+rule. Receive-side C-Octet fields are bounded by their frame; embedded NUL
+cannot be encoded because it would terminate a field early. Non-ASCII address
+octets are preserved for interoperability.
+
+### DecodeError and EncodeError
+
+An intact malformed frame returns `*pdu.DecodeError` with its received header,
+suggested status and cause. The session reports it and continues at the next
+PDU; framing failures instead close the connection after a generic_nack.
+Incomplete reads wrap `pdu.ErrIncompletePDU` and the reader error; invalid
+command lengths wrap `pdu.ErrInvalidCommandLength`. Correlated malformed
+responses are described in the request-window contract above.
+
+See the [encoding error contract](docs/spec-compliance.md#encodeerror) for
+`ByteBuffer.Err()`, `pdu.ErrEncode` and transport `*pdu.EncodeError` handling.
+
+An unencodable client handler response reaches `OnSubmitError` and is replaced
+with a matching, header-only `ESME_RSYSERR` response using the request sequence;
+the handler's `closeBind` decision still applies. Malformed alert_notification
+body fields are reported without a reply, since that command has no response
+(v3.4 §2.8).
+
+### Optional parameters
+
+`PDU.OptionalParameters` is an ordered `[]pdu.Field` that retains repeated TLVs.
+Use `p.GetOptionalParam(tag)` for the first occurrence, or
+`p.GetOptionalParams(tag)` for all occurrences. Indexing by a tag still compiles
+but uses a slice index and may panic.
+
+In `for index, field := range p.OptionalParameters`, the first value is an
+index; read the tag from `field.Tag`. `RegisterOptionalParam` replaces the first
+occurrence; `AppendOptionalParam` adds another in wire order.
+
+`ClearOptionalParameters` detaches the slice; later appends do not overwrite an
+earlier slice returned by `GetOptionalParameters`.
+
+The server advertises `pdu.TagScInterfaceVersion` on successful v3.4-or-later
+binds; older peers do not receive that TLV.
+
+### Long messages and splitting
+
+Use `SetLongMessageWithEnc` followed by `SubmitSM.Split`, or
+`NewLongMessageWithEncoding` for message parts. Submit each resulting PDU.
+Splitting assigns independent sequence numbers, preserves unrelated TLVs,
+replaces UDH concatenation metadata and drops stale SAR TLVs (TS 23.040
+§9.2.3.24). `ShortMessage.IgnoredUDH` exposes a preserved header whose truncated
+final IE prevents parsing; its declared bytes are skipped before the payload.
+`data.CustomEncoding.BaseEncoding` exposes the underlying codec; `ShouldSplit`
+and `EncodeSplit` delegate to its splitter when available. GSM text uses
+escape-safe 160/153-septet budgets; UCS2 counts encoded UTF-16 octets, including
+surrogate pairs. UDH consumes each part's payload budget.
+
+### data_coding
+
+`data.SMSCDefaultCoding` is `0x00`; `GSM7BITCoding` is its compatibility alias.
+The default alphabet and extension table follow TS 23.038 §§6.2.1–6.2.1.1.
+`FromDataCoding` classifies coding groups under TS 23.038 §4; reserved alphabets
+fall back to GSM. Defined compressed alphabets remain raw binary until TS 23.042
+support exists. SMPP 05/09/0A/0D/0E are opaque text alphabets (v3.4 §5.2.19)
+with 140-octet budgets: they remain unsplit when they fit, or fail without a
+character-aware codec. Custom codecs without a splitter accept at most 254
+octets including UDH; received 255-octet fields can still be forwarded.
+
+ASCII encoding rejects unrepresentable characters. Latin-1 preserves C1
+controls. Cyrillic and Hebrew codecs replace C1 controls on decode and reject
+them on encode; see [Known
+limitations](docs/spec-compliance.md#known-limitations).
+
+### Packed GSM
+
+Use packed GSM only when the peer expects it. SMPP carries an octet length, not
+a septet count. The encoder uses the USSD CR-padding convention (TS 23.038
+§6.1.2.3.1); SMS zero padding is §6.1.2.1.1. Decoding supports both, but
+terminal `@` and CR can be ambiguous. Supply a count to `data.DecodeGSM7Packed`
+when available. Raw packed text is split only when it round-trips
+byte-identically, with original text also required for ambiguous tails. See
+[packed GSM conventions](docs/spec-compliance.md#packed-gsm-padding).
+
+## Breaking changes on main
+
+The migration baseline is the retracted `v1.0.1` tag. Migrate callers and custom
+implementations as follows. The contracts above describe the resulting behavior.
+
+### PDUs and encoding
+
+| Change | Replacement |
+| --- | --- |
+| Optional parameters are an ordered slice; tag indexing can compile and panic. | Use `GetOptionalParam` / `GetOptionalParams`; read `field.Tag` when ranging. Use `RegisterOptionalParam` to replace or `AppendOptionalParam` to append. |
+| Clearing optional parameters detaches the slice. | Use `ClearOptionalParameters`; earlier slices are independent of later appends. |
+| Marshal enforces representation, rather than every v3.4 maximum. | Call `pdu.Validate` for strict field maxima, including per-PDU address lengths. |
+| Encode failures are reported explicitly. | Check `ByteBuffer.Err()` and `errors.Is(err, pdu.ErrEncode)`; handle `*pdu.EncodeError`. |
+| `ShortMessage.SetUDH`, `DestinationAddresses.Add`, `ShortMessage.Marshal` and `DestinationAddresses.Marshal` return errors. | Check each result; construction and marshaling can fail. |
+| `pdu.PDU` requires six additional methods. | Custom implementations must add `AppendOptionalParam`, `ClearOptionalParameters`, `GetOptionalParam`, `GetOptionalParameters`, `GetOptionalParams` and `SetCommandStatus`. |
+| `data.SMPP_V33` changes from `-0x33` to `0x33`; `OPT_PAR_MSG_WAIT` from `0x0002` to `0x0030`; `OPT_PAR_QOS_TIME_TO_LIVE_MIN` from `1` to `4`. | Use the named constants and update literal comparisons or lengths to the corrected values. |
+| Reserved `data_coding` alphabets follow TS 23.038 §4, including compressed groups. | Use `FromDataCoding`; reserved alphabets fall back to GSM, while defined compressed alphabets remain binary. |
+
+### Request stores and callbacks
+
+| Change | Replacement |
+| --- | --- |
+| `RequestStore.Delete` and `DefaultStore.Delete` take a `Request` and return `(bool, error)`. | Compare and remove sequence/Owner/ID atomically; let the library ledger arbitrate completion under the [correlation contract](#correlation-and-completion). |
+| `Set` reserves only absent sequences. | Return `ErrSequenceInUse` without overwriting. |
+| `RequestStore` requires `MarkWritten` and `WrittenLength`; `DefaultStore` implements them. | Implement conditional metadata updates and atomic counts under the [store contract](#store-contract). |
+| `Submit` waits for an application-window permit; v1.0.1 failed the PDU through `OnSubmitError` with `ErrWindowsFull`. | Expect backpressure; use `SubmitContext` to bound waiting. A library callback receives `ErrSubmitQueueFull` when it would wait for a full window. |
+| `GetWindowSize` counts written, unanswered application requests, excluding enquire_link; v1.0.1 used store `Length`. | Use it for written window usage; use store `Length` when every reservation is needed. |
+| The example `CustomStore` is no longer comparable, and its constructor returns an error. | Share a pointer to one store instance and check `NewCustomStore` errors. |
+| `Request` gains `Owner`, `ID`, `Lineage`, `WrittenAt`; `Response` gains `Err`. | Preserve metadata through serialization and check `Response.Err` before interpreting a response. |
+| Rejections can return `ErrSequenceInUse`, `ErrSubmitQueueFull`, `ErrRequestCleanupFull` synchronously. | Check `Submit` / `SubmitContext`. Move callback retries to application goroutines with deadlines. |
+| Automatic enquiry responses are untracked; retiring a tracked enquiry emits no completion callback. | Observe automatic and late enquiry responses through `OnUnexpectedPduResponse`. |
+| Completion also depends on the local ledger; a missing response row can complete, and Close completes still-owned transmitted requests despite backend cleanup failure. | Follow the [completion](#correlation-and-completion) and [close/flush](#close-and-store-flush) contracts; callbacks run outside bounded store cleanup. |
+| `ErrRequestCleanupFull` counts uncertain cleanup identities, rather than healthy pending admissions or completed-close cleanup. | Handle the rejection and allow bounded recovery to progress; preserve conditional store operations and the [cleanup limits](#recovery). |
+| Stale or truncated List snapshots and non-comparable decorators are supported for recovery. | Keep List complete where possible; use Get to confirm uncertain identities and a stable comparable store instance for cross-lineage absence settlement. |
+
+### Connections
+
+| Change | Replacement |
+| --- | --- |
+| `Dialer` requires `DialContext(context.Context, string) (net.Conn, error)`. | Adapt with `DialerFunc` and pass the context to TCP/TLS dialing and handshaking. |
+| `NonTLSDialer` is a `Dialer` value, rather than a callable function. | Pass it to a connector, or call its `DialContext` method. |
+| `WithBindTimeout` and connector options are available, including on `TXConnector`. | Pass options when constructing connectors. |
+| Server write errors carry `SubmitError`. | Use `errors.As` to find the failed PDU and unwrap its cause. |
+| Shutdown joins workers except for reentrant/cyclic calls. | Return from the calling callback and use a subsequent external shutdown to join cleanup. |
+
+### Toolchain
+
+The minimum Go version is 1.26. Upgrade the toolchain before building main.
+
+## Specification compliance
+
+See [docs/spec-compliance.md](docs/spec-compliance.md) for authorities, exact
+clauses, interoperability policies and known limitations.
 
 ## Supported PDUs
+
+Command names follow SMPP v3.4 §5.1.2, Table 5-1.
 
 - [x] bind_transmitter
 - [x] bind_transmitter_resp
@@ -360,8 +789,8 @@ See [specification compliance](docs/spec-compliance.md).
 - [x] unbind_resp
 - [x] submit_sm
 - [x] submit_sm_resp
-- [x] submit_sm_multi
-- [x] submit_sm_multi_resp
+- [x] submit_multi
+- [x] submit_multi_resp
 - [x] data_sm
 - [x] data_sm_resp
 - [x] deliver_sm
@@ -377,105 +806,7 @@ See [specification compliance](docs/spec-compliance.md).
 - [x] alert_notification
 - [x] generic_nack
 
-## Breaking changes on main
+## License and NOTICE
 
-`PDU.OptionalParameters` is now an ordered `[]pdu.Field` that retains repeated
-TLVs. Replace `p.OptionalParameters[tag]` with `p.GetOptionalParam(tag)` for the
-first occurrence, or `p.GetOptionalParams(tag)` for all occurrences. Indexing
-by a tag still compiles but uses a slice index and may panic. In
-`for index, field := range p.OptionalParameters`, the first value is an index;
-read the tag from `field.Tag`. `RegisterOptionalParam` replaces the first
-occurrence; `AppendOptionalParam` adds another in wire order.
-
-Encoding failures are available through `ByteBuffer.Err()` and
-`errors.Is(err, pdu.ErrEncode)`. `Connection.WritePDU` returns
-`*pdu.EncodeError` with the offending PDU; `OnSubmitError` receives it while
-the session stays connected. Check buffer errors before writing marshalled bytes.
-
-Marshal and transports now check wire representability, allowing over-limit
-received fields to be forwarded. Call `pdu.Validate(p)` for all SMPP v3.4
-mandatory-field maxima; its joined `*pdu.ValidationError` values identify
-fields and suggested response statuses. Setters retain their construction
-limits. See [the receive/send policy](docs/spec-compliance.md#receive-and-send-length-policy).
-
-Address does not know its containing PDU; call `pdu.Validate` before sending
-to enforce the per-PDU 21/65-octet limits (including NUL). Address setters
-accept up to 64 content octets for every PDU, and Marshal preserves them.
-An address accepted by the setter can exceed submit_sm's maximum and be
-rejected by a strict SMSC. This allows a transit SMSC to forward accepted traffic.
-
-`ClearOptionalParameters` detaches the slice; later appends do not overwrite
-an earlier slice returned by `GetOptionalParameters`.
-
-`RequestStore.Delete` now takes the full `Request` and returns `(bool, error)`.
-Implement it as an atomic comparison and removal: sequence number, `Owner` and `ID`
-must match the stored reservation. Timestamps are metadata and must not affect
-identity. `false, nil` means absent or
-replaced. A successful removal must also claim the local ledger before invoking
-a completion callback; a response finding the row absent can claim that ledger
-before expiry does. Preserve these
-values through `Set`, `Get`, `List`, and serialization. Store operations must be
-safe concurrently and respect context cancellation; `List` should be complete
-but may return stale or truncated snapshots. Recovery confirms each uncertain
-identity with `Get` and conditionally deletes a matching row even if `List`
-omitted it. Entries must remain until explicitly removed: cache
-eviction must not discard outstanding reservations. `Clear` is administrative;
-session cleanup uses conditional deletion of its own reservations.
-Administrative `Clear` or direct removal of library-owned reservations requires
-all sessions using that store to be closed first. Removing entries independently
-of the library's completion path invalidates its admission and completion ledger.
-
-`RequestStore.Set` must atomically insert only an absent sequence and return
-`ErrSequenceInUse` for an existing reservation, leaving it unchanged.
-A failed `Set` is followed by conditional cleanup because a remote backend may
-have inserted the reservation before its acknowledgement failed.
-
-`RequestStore.MarkWritten(ctx, request, sentAt)` must atomically set `WrittenAt`
-only if the pending reservation still matches. Return `false, nil` if a response
-already removed it or another reservation replaced it; never recreate an entry.
-`TimeSent` is nonzero from reservation; zero `WrittenAt` denotes an in-flight
-write and is excluded from expiry. Preserve both timestamps and `Lineage` when
-serializing requests. A session retains its lineage through rebinds. Callbacks
-do not consume store deadlines. A store may be shared by sessions in one process;
-`Owner`, `Lineage` and `ID` use counters seeded with a random 64-bit process prefix
-at startup, with a time/process-ID fallback if the entropy reader fails. Collisions
-between processes or restarts are negligible. Silent foreign cleanup requires an
-exact sequence and reservation ID retained in a known, finally closed local owner's
-ledger; an unknown process's rows are preserved. Separate backend namespaces per
-process remain recommended: capacity and sequence numbers are shared, and one
-process cannot reclaim another process's rows after it exits. For absence recovery
-across local Sessions, reuse the same store instance (a pointer implementation or
-comparable value such as DefaultStore), rather than separate wrappers around one
-backend. Decorators containing non-comparable interface values are safe to use,
-but cannot establish backend identity for absence settlement across lineages.
-Close also settles uncertain identities whose rows were never inserted;
-if its reads fail, a later Session on that store can confirm absence silently.
-Settling the final identity of a closed lineage also clears its abandoned markers
-and recovery hint.
-Retries rejected by a retained sequence still trigger rate-limited recovery, so
-recovery does not require a successful new submission.
-
-`RequestStore.WrittenLength(ctx, excludeOwner)` counts entries with nonzero
-`WrittenAt`, excluding enquire_link and the supplied nonzero owner. Zero includes
-all owners. Maintain this count atomically with `Set`, `MarkWritten`, `Delete`
-and `Clear`. `Length` still counts every reservation. The writer adds its own
-local written count so a failed metadata update cannot erase its capacity usage.
-
-`Dialer` now requires `DialContext(context.Context, string) (net.Conn, error)`.
-Use `DialerFunc` to adapt a custom function. Pass its context to TCP/TLS dialing
-and handshaking, for example `net.Dialer.DialContext` or `tls.Dialer.DialContext`.
-
-`Request` gains `Owner`, `ID`, `Lineage` and `WrittenAt`; `Response` gains `Err`.
-`ErrSequenceInUse`, `ErrSubmitQueueFull` and `ErrRequestCleanupFull` identify
-synchronous submission rejection.
-
-Library-worker callbacks receive `ErrSubmitQueueFull` synchronously when the
-application window is full, their writer queue cannot advance, or a blocking wait
-would create a cycle. Rejected submissions do not call `OnSubmitError`: always
-check the return from `Submit`/`SubmitContext`. In `OnClosePduRequest` and
-`OnRebind`, hand retry work to an application goroutine or application-owned retry
-queue, return from the callback, and let that goroutine use `SubmitContext` with
-an application deadline. Automatic enquiry responses now use
-`OnUnexpectedPduResponse` because automatic enquiries create no window entries.
-`WithBindTimeout` and
-`SubmitError` are added, and `TXConnector` accepts optional connector options.
+Licensed under [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) and
+[LICENSES/](LICENSES/) for retained license notices.

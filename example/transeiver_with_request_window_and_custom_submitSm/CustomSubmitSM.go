@@ -16,9 +16,13 @@ type CustomSubmitSM struct {
 
 // newCustomSubmitSM returns CustomSubmitSM PDU.
 // Using rand.Int to generate new id for each CustomSubmitSM
-func newCustomSubmitSM() CustomSubmitSM {
-	return CustomSubmitSM{
-		PDU:       newSubmitSM(),
-		messageId: strconv.Itoa(rand.Int()),
+func newCustomSubmitSM() (CustomSubmitSM, error) {
+	submit, err := newSubmitSM()
+	if err != nil {
+		return CustomSubmitSM{}, err
 	}
+	return CustomSubmitSM{
+		PDU:       submit,
+		messageId: strconv.Itoa(rand.Int()),
+	}, nil
 }

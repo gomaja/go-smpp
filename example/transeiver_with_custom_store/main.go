@@ -1,10 +1,11 @@
+// This example correlates requests using a serialized, conditional RequestStore.
 package main
 
 import (
-	"errors"
-	"fmt"
+	"context"
 	"log"
-	"sync"
+	"os"
+	"os/signal"
 	"time"
 
 	gosmpp "github.com/gomaja/go-smpp"
@@ -13,49 +14,41 @@ import (
 )
 
 func main() {
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go sendingAndReceiveSMS(&wg)
-
-	wg.Wait()
-}
-
-func sendingAndReceiveSMS(wg *sync.WaitGroup) {
-	defer wg.Done()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
 
 	auth := gosmpp.Auth{
-		SMSC:       "localhost:2775",
-		SystemID:   "169994",
-		Password:   "EDXPJU",
+		SMSC:       "127.0.0.1:2775",
+		SystemID:   "esme",
+		Password:   "secret",
 		SystemType: "",
 	}
 
+	store, err := NewCustomStore()
+	if err != nil {
+		log.Print(err)
+		return
+	}
 	trans, err := gosmpp.NewSession(
 		gosmpp.TRXConnector(gosmpp.NonTLSDialer, auth),
 		gosmpp.Settings{
-			EnquireLink: 5 * time.Second,
+			EnquireLink: time.Minute,
 
-			ReadTimeout: 10 * time.Second,
+			ReadTimeout:  2 * time.Minute,
+			WriteTimeout: 5 * time.Second,
 
-			OnSubmitError: func(p pdu.PDU, err error) {
-				if errors.Is(err, gosmpp.ErrWindowsFull) {
-					log.Println("SubmitPDU error:", err)
-				} else {
-					log.Fatal("SubmitPDU error:", err)
-				}
-			},
+			OnSubmitError: func(_ pdu.PDU, err error) { log.Print("SubmitPDU error: ", err) },
 
 			OnReceivingError: func(err error) {
-				fmt.Println("Receiving PDU/Network error:", err)
+				log.Print("Receiving PDU/Network error:", err)
 			},
 
 			OnRebindingError: func(err error) {
-				fmt.Println("Rebinding but error:", err)
+				log.Print("Rebinding but error:", err)
 			},
 
 			OnClosed: func(state gosmpp.State) {
-				fmt.Println(state)
+				log.Print(state.String())
 			},
 
 			WindowedRequestTracking: &gosmpp.WindowedRequestTracking{
@@ -66,150 +59,74 @@ func sendingAndReceiveSMS(wg *sync.WaitGroup) {
 				PduExpireTimeOut:      30 * time.Second,
 				ExpireCheckTimer:      10 * time.Second,
 				MaxWindowSize:         30,
+				StoreAccessTimeOut:    time.Second,
 				EnableAutoRespond:     false,
 			},
 		},
 		5*time.Second,
-		gosmpp.WithRequestStore(NewCustomStore()),
+		gosmpp.WithRequestStore(&store),
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		return
 	}
 	defer func() {
 		_ = trans.Close()
 	}()
 
-	// sending SMS(s)
-	for i := 0; i < 60; i++ {
-		var size int
-		size, err = trans.GetWindowSize()
-		if err != nil {
-			fmt.Println("could not get window size: ", err)
-		} else {
-			fmt.Println("Current window size: ", size)
-		}
-		p := newSubmitSM()
-		if err = trans.Transceiver().Submit(p); err != nil {
-			fmt.Println(err)
-		}
-		fmt.Printf("Sent SubmitSM with id: %+v\n", p)
-		time.Sleep(1 * time.Second)
+	submit, err := newSubmitSM()
+	if err != nil {
+		log.Print(err)
+		return
 	}
-	time.Sleep(1 * time.Second)
+	if err = trans.Transceiver().Submit(submit); err != nil {
+		log.Print(err)
+	}
+	<-ctx.Done()
 }
 
 func handleExpirePduRequest() func(pdu.PDU) bool {
-	return func(p pdu.PDU) bool {
-		switch p.(type) {
-
-		case *pdu.SubmitSM:
-			fmt.Printf("Expired SubmitSM: %+v\n", p)
-
-		case *pdu.EnquireLink:
-			fmt.Printf("Expired EnquireLink: %+v\n", p)
-			return true // if the enquire_link expired, usually means the bind is stale
-
-		case *pdu.DataSM:
-			fmt.Printf("Expired DataSM: %+v\n", p)
-
-		default:
-			fmt.Printf("Expired PDU: %+v\n", p)
-		}
-
-		return false
-	}
+	return func(p pdu.PDU) bool { log.Printf("Expired %T", p); return false }
 }
 
 func handleOnClosePduRequest() func(pdu.PDU) {
-	return func(p pdu.PDU) {
-		switch p.(type) {
-		case *pdu.Unbind:
-			fmt.Printf("OnClose Unbind: %+v\n", p)
-
-		case *pdu.SubmitSM:
-			fmt.Printf("OnClose SubmitSM: %+v\n", p)
-
-		case *pdu.EnquireLink:
-			fmt.Printf("OnClose EnquireLink: %+v\n", p)
-
-		case *pdu.DataSM:
-			fmt.Printf("OnClose DataSM: %+v\n", p)
-		}
-	}
+	return func(p pdu.PDU) { log.Printf("Closed with pending %T", p) }
 }
 
-func handleExpectedPduResponse() func(response gosmpp.Response) {
+func handleExpectedPduResponse() func(gosmpp.Response) {
 	return func(response gosmpp.Response) {
 		if response.Err != nil {
-			fmt.Printf("Malformed response for sequence %d: %v\n", response.GetSequenceNumber(), response.Err)
+			log.Print(response.Err)
 			return
 		}
-		switch response.PDU.(type) {
-		case *pdu.UnbindResp:
-			fmt.Println("UnbindResp Received")
-			fmt.Printf("OriginalSM id:%+v\n", response.OriginalRequest.PDU)
-
-		case *pdu.SubmitSMResp:
-			fmt.Printf("SubmitSMResp Received: %+v\n", response.PDU)
-			fmt.Printf("OriginalSM SubmitSM:%+v\n", response.OriginalRequest.PDU)
-
-		case *pdu.EnquireLinkResp:
-			fmt.Println("EnquireLinkResp Received")
-			fmt.Printf("Original EnquireLink:%+v\n", response.OriginalRequest.PDU)
-
-		}
+		log.Printf("Response %T, status %v, original %T", response.PDU,
+			response.GetHeader().CommandStatus, response.OriginalRequest.PDU)
 	}
 }
 
 func handleReceivedPduRequest() func(pdu.PDU) (pdu.PDU, bool) {
 	return func(p pdu.PDU) (pdu.PDU, bool) {
-		switch pd := p.(type) {
-		case *pdu.Unbind:
-			fmt.Println("Unbind Received")
-			return pd.GetResponse(), true
-
-		case *pdu.GenericNack:
-			fmt.Println("GenericNack Received")
-
-		case *pdu.EnquireLinkResp:
-			fmt.Println("EnquireLinkResp Received")
-
-		case *pdu.EnquireLink:
-			fmt.Println("EnquireLink Received")
-			return pd.GetResponse(), false
-
-		case *pdu.DataSM:
-			fmt.Println("DataSM Received")
-			return pd.GetResponse(), false
-
-		case *pdu.DeliverSM:
-			fmt.Println("DeliverSM Received")
-			return pd.GetResponse(), false
+		if p.CanResponse() {
+			_, unbind := p.(*pdu.Unbind)
+			return p.GetResponse(), unbind
 		}
 		return nil, false
 	}
 }
 
-func newSubmitSM() *pdu.SubmitSM {
-	// build up submitSM
-	srcAddr := pdu.NewAddress()
-	srcAddr.SetTon(5)
-	srcAddr.SetNpi(0)
-	_ = srcAddr.SetAddress("00" + "522241")
-
-	destAddr := pdu.NewAddress()
-	destAddr.SetTon(1)
-	destAddr.SetNpi(1)
-	_ = destAddr.SetAddress("99" + "522241")
-
-	submitSM := pdu.NewSubmitSM().(*pdu.SubmitSM)
-	submitSM.SourceAddr = srcAddr
-	submitSM.DestAddr = destAddr
-	_ = submitSM.Message.SetMessageWithEncoding("Đừng buồn thế dù ngoài kia vẫn mưa nghiễng rợi tý tỵ", data.UCS2)
-	submitSM.ProtocolID = 0
-	submitSM.RegisteredDelivery = 1
-	submitSM.ReplaceIfPresentFlag = 0
-	submitSM.EsmClass = 0
-
-	return submitSM
+func newSubmitSM() (*pdu.SubmitSM, error) {
+	submit := pdu.NewSubmitSM().(*pdu.SubmitSM)
+	var err error
+	submit.SourceAddr, err = pdu.NewAddressWithTonNpiAddr(5, 0, "Example")
+	if err != nil {
+		return nil, err
+	}
+	submit.DestAddr, err = pdu.NewAddressWithTonNpiAddr(1, 1, "12025550123")
+	if err != nil {
+		return nil, err
+	}
+	if err = submit.Message.SetMessageWithEncoding("Hello, 世界", data.UCS2); err != nil {
+		return nil, err
+	}
+	return submit, nil
 }

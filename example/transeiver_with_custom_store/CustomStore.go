@@ -27,23 +27,28 @@ type CustomStore struct {
 	written      *writtenCounts
 }
 
+var _ gosmpp.RequestStore = (*CustomStore)(nil)
+
 type writtenCounts struct {
 	total  int
 	owners map[uint64]int
 }
 
-func NewCustomStore() CustomStore {
+func NewCustomStore() (CustomStore, error) {
 	config := bigcache.DefaultConfig(30 * time.Second)
 	// Set can evict old cached copies; no cleanup goroutine is needed because
 	// the reservation index controls request lifetime.
 	config.CleanWindow = 0
-	cache, _ := bigcache.New(context.Background(), config)
+	cache, err := bigcache.New(context.Background(), config)
+	if err != nil {
+		return CustomStore{}, err
+	}
 	return CustomStore{
 		store:        cache,
 		mu:           &sync.RWMutex{},
 		reservations: make(map[string][]byte),
 		written:      &writtenCounts{owners: make(map[uint64]int)},
-	}
+	}, nil
 }
 
 func (s CustomStore) Set(ctx context.Context, request gosmpp.Request) error {
@@ -120,6 +125,7 @@ func (s CustomStore) Get(ctx context.Context, sequenceNumber int32) (gosmpp.Requ
 		}
 		request, err := deserialize(reserved)
 		if err != nil {
+			// Get has no error result; undecodable data is unusable as a request.
 			return gosmpp.Request{}, false
 		}
 		return request, true

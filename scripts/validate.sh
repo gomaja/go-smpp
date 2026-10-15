@@ -21,10 +21,9 @@
 # export data of the toolchain that runs them.
 set -euo pipefail
 
-# staticcheck 2026.2.1 cannot read Go 1.27.2 export data
-# (https://github.com/dominikh/go-tools/issues/1832); pinned to the fix commit
-# until a release that contains it is tagged.
-STATICCHECK=honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009221906-f1838cc308e5
+# 2026.2.2 is the first release that reads Go 1.27 export data
+# (https://github.com/dominikh/go-tools/issues/1832).
+STATICCHECK=honnef.co/go/tools/cmd/staticcheck@v0.8.2
 GOLANGCI_LINT=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GOVULNCHECK=golang.org/x/vuln/cmd/govulncheck@v1.8.0
 GITLEAKS=github.com/zricethezav/gitleaks/v8@v8.30.1

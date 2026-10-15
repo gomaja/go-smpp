@@ -43,7 +43,17 @@ func gsm7Options(enc data.Encoding) (data.GSM7Options, bool) {
 		return configured.GSM7Options(), true
 	}
 	if enc == data.GSM7BITPACKED {
-		return data.GSM7Options{Packed: true}, true
+		// The legacy packed path borrows the selected alphabet and NLI tables,
+		// but owns packing itself. Resolve once so self-replacement terminates.
+		opts := data.GSM7Options{Packed: true}
+		alphabet, err := data.UnpackedGSM7(data.GSM7BIT)
+		if err == nil {
+			if configured, ok := alphabet.(interface{ GSM7Options() data.GSM7Options }); ok {
+				opts = configured.GSM7Options()
+				opts.Packed = true
+			}
+		}
+		return opts, true
 	}
 	return data.GSM7Options{}, enc == nil || enc == data.GSM7BIT
 }
@@ -117,14 +127,9 @@ func unpackedGSMCodec(enc data.Encoding) (data.Encoding, error) {
 	// Legacy PDU setters share their caller-selected alphabet with the public
 	// fill/count decoder. Standalone packed codecs remain independent of it.
 	if enc == data.GSM7BITPACKED {
-		return data.GSM7BIT, nil
+		return data.UnpackedGSM7(data.GSM7BIT)
 	}
-	opts, _ := gsm7Options(enc)
-	if !opts.Packed && opts.LockingShift == 0 && opts.SingleShift == 0 {
-		return data.GSM7BIT, nil
-	}
-	opts.Packed = false
-	return data.NewGSM7(opts)
+	return data.UnpackedGSM7(enc)
 }
 
 // GSM segmentation preserves the original septets and the segment's NLI IEs;

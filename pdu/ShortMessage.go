@@ -54,6 +54,9 @@ func NewLongMessage(message string) (s []*ShortMessage, err error) {
 
 // NewLongMessageWithEncoding returns long message splitted into multiple short message with encoding of choice
 func NewLongMessageWithEncoding(message string, enc data.Encoding) (s []*ShortMessage, err error) {
+	if enc == nil {
+		enc = data.GSM7BIT
+	}
 	sm := &ShortMessage{message: message, enc: enc}
 	if opts, gsm := gsm7Options(enc); gsm && (opts.LockingShift != 0 || opts.SingleShift != 0) {
 		if err := sm.SetLongMessageWithEnc(message, enc); err != nil {
@@ -174,6 +177,9 @@ func (c *ShortMessage) SetUDH(udh UDH) error {
 
 // SetMessageDataWithEncoding sets the raw data used for PDU marshaling.
 func (c *ShortMessage) SetMessageDataWithEncoding(d []byte, enc data.Encoding) error {
+	if enc == nil {
+		enc = data.GSM7BIT
+	}
 	if err := c.validatePayload(d); err != nil {
 		return err
 	}
@@ -220,11 +226,16 @@ func (c *ShortMessage) GetMessageWithEncoding(enc data.Encoding) (st string, err
 		if encodeErr == nil && headerErr == nil && len(matchingHeader) == len(c.udHeader) && bytes.Equal(encoded, c.messageData) {
 			return c.message, nil
 		}
-		if !c.udHeader.hasNationalLanguage() {
-			return data.DecodeGSM7Packed(c.messageData, uint8(packedFillBits(c.headerLength())), -1)
-		}
 		septets := gsm7.Unpack7BitCR(c.messageData, packedFillBits(c.headerLength()))
-		return decodeGSM7WithUDH(septets, c.udHeader)
+		opts, _ := gsm7Options(enc)
+		if c.udHeader.hasNationalLanguage() || opts.LockingShift != 0 || opts.SingleShift != 0 {
+			return decodeGSM7WithUDH(septets, c.udHeader)
+		}
+		codec, err := unpackedGSMCodec(enc)
+		if err != nil {
+			return "", err
+		}
+		return codec.Decode(septets)
 	}
 	if unpackedGSMAlphabet(enc) && c.udHeader.hasNationalLanguage() {
 		return decodeGSM7WithUDH(c.messageData, c.udHeader)
@@ -303,7 +314,7 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 	payload := c.messageData
 	if payload == nil && c.message != "" {
 		var err error
-		payload, err = encoding.Encode(c.message)
+		payload, err = encodeTextWithUDH(c.message, encoding, c.udHeader)
 		if err != nil {
 			return nil, err
 		}
@@ -402,14 +413,16 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 				return nil, fmt.Errorf("message cannot be resegmented without changing encoded content")
 			}
 		}
+		var alphabet data.Encoding
 		if packedGSMAlphabet(encoding) {
-			// Split before packing so the exact septet count is retained and
-			// any preserved UDH receives its own correct fill-bit alignment.
-			splitter = data.GSM7BIT.(data.Splitter)
+			// Split unpacked septets, then apply each segment's UDH alignment
+			// (TS 23.040 §9.2.3.24). The alphabet need not be a Splitter.
+			alphabet, err = unpackedGSMCodec(encoding)
+			if err != nil {
+				return nil, err
+			}
 			limit = 160 - (len(header)*8+6)/7
-		}
-		if packedGSMAlphabet(encoding) {
-			septets, encodeErr := data.GSM7BIT.Encode(text)
+			septets, encodeErr := alphabet.Encode(text)
 			if encodeErr != nil {
 				return nil, encodeErr
 			}
@@ -422,7 +435,7 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 		}
 		if packedGSMAlphabet(encoding) {
 			for i, segment := range segments {
-				text, err := data.GSM7BIT.Decode(segment)
+				text, err := alphabet.Decode(segment)
 				if err != nil {
 					return nil, err
 				}

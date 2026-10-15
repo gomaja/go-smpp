@@ -13,13 +13,18 @@ const escapeSequence = 0x1b
 // septetCount preserves exactly that many septets via gsm7.Unpack7Bit. With
 // count -1, gsm7.Unpack7BitCR applies TS 23.038 section 6.1.2.3.1's CR
 // convention: zero septets and doubled CRs are retained; a final CR on a
-// complete septet boundary is removed. The mutable GSM7BIT selects the alphabet.
+// complete septet boundary is removed. The mutable GSM7BIT selects the alphabet;
+// any packing option on that codec is ignored while its tables are retained.
 func DecodeGSM7Packed(src []byte, fillBits uint8, septetCount int) (string, error) {
 	septets, err := unpackGSM7(src, fillBits, septetCount)
 	if err != nil || len(src) == 0 {
 		return "", err
 	}
-	return GSM7BIT.Decode(septets)
+	codec, err := UnpackedGSM7(GSM7BIT)
+	if err != nil {
+		return "", err
+	}
+	return codec.Decode(septets)
 }
 
 // Validate public input before the dependency's fill-bit panic boundary.

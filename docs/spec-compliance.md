@@ -773,8 +773,31 @@ text: it extracts with `gsm7.Unpack7Bit`, rejects counts beyond the available
 payload, then decodes exactly that many septets. Count `-1` selects inferred
 CR decoding. Raw septets are available directly through these go-sms APIs.
 Legacy packed PDU setters share the public decoder's replaceable `GSM7BIT`
-alphabet, including through custom wrappers. Standalone packed codecs remain
-independent of that variable, and `NewGSM7` sending keeps its explicit tables.
+alphabet, including through custom wrappers. Alphabet resolution always
+removes packing: a configured replacement keeps its locking and single-shift
+tables with `Packed: false`; a legacy packed replacement resolves to the
+built-in unpacked alphabet without consulting the variable again. Custom
+unpacked alphabets retain their conversion and need not implement `Splitter`
+for the legacy packed PDU path. PDU construction, decoding and splitting apply
+packing or unpacking exactly once. Legacy packed construction includes the
+replacement's configured NLI IEs on every segment (TS 23.040
+§§9.2.3.24.15–16). Explicitly configured packed codecs use their own alphabet
+when no NLI IEs are present; PDU decoding with a configured national-language
+codec uses the default receive tables when its NLI IEs are absent. Received NLI IEs take
+precedence over codec table options.
+
+`FromDataCoding(0)` resolves the current `GSM7BIT`, rather than a saved initial
+codec. Assigning `GSM7BIT = GSM7BITPACKED` therefore makes data_coding 0 packed;
+a configured packed replacement does likewise. A custom replacement supplies
+its selected conversion. The returned codec preserves wire coding 0 even if
+the replacement advertises a different coding. Configure the variable before
+concurrent use: access is not synchronized. Nil encoding arguments on text
+constructors and raw setters resolve that default before selecting NLI IEs or
+segmentation budgets. These corrections are listed in
+the [behavior-change table](../README.md#pdus-and-encoding).
+
+Standalone packed codecs remain independent of that variable, and `NewGSM7`
+sending keeps its explicit tables.
 Getters retain known original text only while its encoding matches the stored
 bytes and the current UDH contains every configured selector with its selected
 value (TS 23.040 §9.2.3.24.15–16).

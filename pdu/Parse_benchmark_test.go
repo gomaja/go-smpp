@@ -100,11 +100,14 @@ func BenchmarkParse(b *testing.B) {
 	}
 }
 
-// Budgets measured with these independent fixtures. The UDH deliver_sm budget
-// includes copied IE data and conversion to the public header type.
+// Budgets measured without race instrumentation. The submit_sm and deliver_sm_udh
+// budgets include copied IE data and conversion to the public header type.
 func TestParseAllocationBudget(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation budgets are measured without race instrumentation")
+	}
 	budgets := map[string]float64{
-		"submit_sm": 28, "deliver_sm": 26, "deliver_sm_udh": 20, "enquire_link": 9,
+		"submit_sm": 28, "deliver_sm": 24, "deliver_sm_udh": 20, "enquire_link": 9,
 		"submit_sm_resp": 12, "submit_multi_resp": 18,
 	}
 	for _, tc := range benchmarkParseFrames() {

@@ -284,3 +284,51 @@ func TestStandaloneInfoElementLengthDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestStandaloneInfoElementErrorsLeaveReceiverUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+		{"missing_length", []byte{0x70}},
+		{"missing_data", []byte{0x70, 1}},
+		{"truncated_data", []byte{0x70, 2, 0x41}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ie := InfoElement{ID: 0x42, Data: []byte{9, 8}}
+			n, err := ie.UnmarshalBinary(tc.raw)
+			require.Error(t, err)
+			require.Zero(t, n)
+			require.Equal(t, InfoElement{ID: 0x42, Data: []byte{9, 8}}, ie)
+		})
+	}
+}
+
+func TestStandaloneInfoElementZeroLengthDataIsNonNil(t *testing.T) {
+	ie := InfoElement{ID: 0xff, Data: []byte{9}}
+	n, err := ie.UnmarshalBinary([]byte{0x70, 0})
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, byte(0x70), ie.ID)
+	require.NotNil(t, ie.Data)
+	require.Empty(t, ie.Data)
+}
+
+func TestFindInfoElementMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header UDH
+	}{
+		{"nil", nil},
+		{"empty", UDH{}},
+		{"nonmatching", UDH{{ID: 0x71, Data: []byte{9}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ie, found := tc.header.FindInfoElement(0x70)
+			require.False(t, found)
+			require.Nil(t, ie)
+		})
+	}
+}

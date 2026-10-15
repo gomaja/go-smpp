@@ -63,6 +63,9 @@ func (c *SubmitSM) GetResponse() PDU {
 // Each have the TPUD within the GSM's User Data limit of 140 octet
 // If the message is short enough and doesn't need splitting,
 // Split() returns an array of length 1
+// Returned messages resolve a nil encoding to data.DefaultGSM7(), including
+// its data_coding. A single part updates the source message in place;
+// a multipart result leaves the source encoding unchanged.
 func (c *SubmitSM) Split() (multiSubSM []*SubmitSM, err error) {
 	multiSubSM = []*SubmitSM{}
 

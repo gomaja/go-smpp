@@ -773,8 +773,43 @@ text: it extracts with `gsm7.Unpack7Bit`, rejects counts beyond the available
 payload, then decodes exactly that many septets. Count `-1` selects inferred
 CR decoding. Raw septets are available directly through these go-sms APIs.
 Legacy packed PDU setters share the public decoder's replaceable `GSM7BIT`
-alphabet, including through custom wrappers. Standalone packed codecs remain
-independent of that variable, and `NewGSM7` sending keeps its explicit tables.
+alphabet, including through custom wrappers. Alphabet resolution always
+removes packing: a configured replacement keeps its locking and single-shift
+tables with `Packed: false`; a legacy packed replacement resolves to the
+built-in unpacked alphabet without consulting the variable again. Custom
+unpacked alphabets retain their conversion and need not implement `Splitter`
+for the legacy packed PDU path. PDU construction, decoding and splitting apply
+packing or unpacking exactly once. Legacy packed construction includes the
+replacement's configured NLI IEs on every segment (TS 23.040
+§§9.2.3.24.15–16). Explicitly configured default-table packed codecs retain
+their default alphabet during PDU decoding. Standalone configured codec
+`Decode` uses its selected tables and has no UDH to interpret. PDU receive
+decoding instead selects tables from received NLI IEs; absent IEs select the
+corresponding default tables, including when the receive codec was configured
+with national-language tables. Received NLI IEs take precedence over codec
+table options.
+
+`FromDataCoding(0)` resolves the current `GSM7BIT`, rather than a saved initial
+codec. Assigning `GSM7BIT = GSM7BITPACKED` therefore makes data_coding 0 packed;
+a configured packed replacement does likewise. A custom replacement supplies
+its selected conversion. The returned codec preserves wire coding 0 even if
+the replacement advertises a different coding. Configure the variable before
+concurrent use: access is not synchronized. `DefaultGSM7` is the effective
+default lookup: a nil `GSM7BIT` selects the built-in unpacked default codec.
+Coding lookup, encoding selection, text constructors and packed alphabet
+resolution all use that policy. Nil text encoding arguments resolve the
+effective default before selecting NLI IEs. Raw setters retain nil in
+`Encoding()` and marshal data_coding 0 regardless of the replacement's coding.
+`GetMessageWithEncoding(nil)` uses the effective default without changing the
+stored encoding. `Split()` resolves nil on every returned message to the
+effective codec, retaining its data_coding as before.
+Thus an ASCII default gives split results coding 1. A single part resolves the
+source in place; multipart splitting leaves the source encoding unchanged.
+These corrections are listed in
+the [behavior-change table](../README.md#pdus-and-encoding).
+
+Standalone packed codecs remain independent of that variable, and `NewGSM7`
+sending keeps its explicit tables.
 Getters retain known original text only while its encoding matches the stored
 bytes and the current UDH contains every configured selector with its selected
 value (TS 23.040 §9.2.3.24.15–16).

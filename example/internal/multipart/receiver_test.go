@@ -192,3 +192,44 @@ func TestReferenceWidthsAreIndependent(t *testing.T) {
 		t.Fatalf("16-bit completion = %q, %t, %v", text, ready, err)
 	}
 }
+
+// Invalid trailing IEs must not change the selected reference width or hide
+// earlier valid metadata (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8).
+func TestLastApplicableConcatReference(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wide bool
+		tail pdu.InfoElement
+	}{
+		{"short_16bit_after_8bit", false, pdu.InfoElement{ID: 8, Data: []byte{7}}},
+		{"invalid_16bit_after_8bit", false, pdu.NewIEConcatMessage16Bit(0, 0, 7)},
+		{"short_8bit_after_16bit", true, pdu.InfoElement{ID: 0, Data: []byte{7}}},
+		{"invalid_8bit_after_16bit", true, pdu.NewIEConcatMessage(0, 0, 7)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var receiver Receiver
+			first := part(t, "A", 2, 1, 7, false)
+			last := part(t, "B", 2, 2, 7, false)
+			var firstIE, lastIE pdu.InfoElement
+			if tc.wide {
+				firstIE = pdu.NewIEConcatMessage16Bit(2, 1, 7)
+				lastIE = pdu.NewIEConcatMessage16Bit(2, 2, 7)
+			} else {
+				firstIE = pdu.NewIEConcatMessage(2, 1, 7)
+				lastIE = pdu.NewIEConcatMessage(2, 2, 7)
+			}
+			if err := first.Message.SetUDH(pdu.UDH{firstIE, tc.tail}); err != nil {
+				t.Fatal(err)
+			}
+			if err := last.Message.SetUDH(pdu.UDH{lastIE}); err != nil {
+				t.Fatal(err)
+			}
+			if text, ready, err := receiver.Add(first); err != nil || ready || text != "" {
+				t.Fatalf("first part = %q, %t, %v; want pending", text, ready, err)
+			}
+			if text, ready, err := receiver.Add(last); err != nil || !ready || text != "AB" {
+				t.Fatalf("last part = %q, %t, %v; want AB", text, ready, err)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gomaja/go-smpp/data"
 	"github.com/gomaja/go-smpp/pdu"
+	"github.com/gomaja/go-sms/encoding/tpdu"
 )
 
 const maxMessages = 32
@@ -44,16 +45,18 @@ func (r *Receiver) Add(pd *pdu.DeliverSM) (text string, ready bool, err error) {
 		return text, false, err
 	}
 	udh := pd.Message.UDH()
-	total, sequence, reference, found := udh.GetConcatInfo()
+	header := make(tpdu.UserDataHeader, len(udh))
+	for i, ie := range udh {
+		header[i] = tpdu.InformationElement{ID: ie.ID, Data: ie.Data}
+	}
+	// Use the same last-applicable IE and reference width as GetConcatInfo
+	// (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8).
+	info, found := header.ConcatInfo()
+	total, sequence, reference := byte(info.Total), byte(info.Seqno), uint16(info.Ref)
 	referenceType := byte(data.UDH_CONCAT_MSG_16_BIT_REF)
 	if found {
-		// Match GetConcatInfo's last-IE rule; 8-bit and 16-bit references
-		// occupy separate spaces (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8).
-		for i := len(udh) - 1; i >= 0; i-- {
-			if udh[i].ID == data.UDH_CONCAT_MSG_8_BIT_REF || udh[i].ID == data.UDH_CONCAT_MSG_16_BIT_REF {
-				referenceType = udh[i].ID
-				break
-			}
+		if !info.Ref16Bit {
+			referenceType = data.UDH_CONCAT_MSG_8_BIT_REF
 		}
 	} else {
 		total, sequence, reference, found = pd.GetSARConcatInfo()

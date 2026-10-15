@@ -288,13 +288,13 @@ func TestUCS2UTF16BECompatibility(t *testing.T) {
 		errKind string
 	}{
 		{"odd_octet", []byte{0}, "", "odd"},
-		{"odd_after_character", []byte{0, 0x41, 0}, "", "odd"},
+		{"odd_preserves_character", []byte{0, 0x41, 0}, "A", "odd"},
 		{"high_surrogate", []byte{0xd8, 0x3d}, "", "dangling"},
 		{"low_surrogate", []byte{0xde, 0}, "\ufffd", ""},
 		{"reversed_pair", []byte{0xde, 0, 0xd8, 0x3d}, "\ufffd", "dangling"},
 		{"high_then_BMP", []byte{0xd8, 0x3d, 0, 0x41}, "\ufffdA", ""},
 		{"high_then_high", []byte{0xd8, 0x3d, 0xd8, 0x3d}, "\ufffd", "dangling"},
-		{"truncated_low_surrogate", []byte{0xd8, 0x3d, 0xde}, "", "odd"},
+		{"high_before_final_octet", []byte{0xd8, 0x3d, 0xde}, "\ufffd", "odd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decoded, err := UCS2.Decode(tc.wire)
@@ -302,6 +302,9 @@ func TestUCS2UTF16BECompatibility(t *testing.T) {
 			if decoded != tc.want || tc.errKind == "odd" && !errors.Is(err, smsucs2.ErrInvalidLength) ||
 				tc.errKind == "dangling" && !errors.As(err, &dangling) || tc.errKind == "" && err != nil {
 				t.Errorf("Decode(%X)=%q,%v; want %q error=%s", tc.wire, decoded, err, tc.want, tc.errKind)
+			}
+			if tc.errKind == "odd" && errors.As(err, &dangling) {
+				t.Errorf("odd payload must not carry a dangling surrogate: %v", err)
 			}
 		})
 	}

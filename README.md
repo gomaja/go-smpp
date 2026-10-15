@@ -837,8 +837,12 @@ octets including UDH; received 255-octet fields can still be forwarded.
 as surrogate pairs; `data.UCS2Strict` encodes only BMP Unicode scalar values.
 Both send `data_coding=0x08` and reject malformed string UTF-8. They use go-sms's
 `ucs2.EncodeUTF16` and `ucs2.Encode` respectively, and share `ucs2.Decode` on
-receive (TS 23.038 §6.2.3; RFC 2781 §§2.1–2.2). Odd byte lengths return
-`ucs2.ErrInvalidLength`; a final high surrogate returns the decoded prefix and
+receive (TS 23.038 §6.2.3; RFC 2781 §§2.1–2.2). Odd byte lengths return the
+text decoded from complete 16-bit units together with `ucs2.ErrInvalidLength`.
+The final octet is neither decoded nor carried into the next segment
+(TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). A high surrogate before that octet
+becomes U+FFFD, with only `ucs2.ErrInvalidLength`. An even-length payload
+ending in a high surrogate returns the decoded prefix and
 `ucs2.ErrDanglingSurrogate`. Other unpaired surrogates become U+FFFD. Neither
 decoder strips a BOM or changes the fixed big-endian byte order.
 
@@ -906,7 +910,7 @@ implementations as follows. The contracts above describe the resulting behavior.
 | `GetSeptetCount` on the packed codec's concrete type is removed. | Use the length of `gsm7.Encode` output to count septets before packing; extension characters consume two. |
 | `data.ErrInvalidCharacter` and `data.ErrInvalidByte` are removed. | GSM encoding returns `gsm7.ErrUnencodable` or `gsm7.ErrInvalidUTF8`; inspect them with `errors.As`. Unpacked decoding now follows the permissive policy above. Invalid packed fill/count arguments return ordinary descriptive errors. |
 | `data.UCS2` uses go-sms's UTF-16 codec; `data.UCS2Strict` adds strict UCS2 encoding with the same wire value `0x08`. | Keep `UCS2` for supplementary-character interoperability or explicitly select `UCS2Strict`; handle `ucs2.ErrUnencodable` for supplementary characters in strict mode. |
-| Malformed string UTF-8 is rejected, and UCS2/UTF-16 odd lengths or final high surrogates return typed errors. | Check errors from setters and getters with `errors.Is` / `errors.As`; retain a decoded prefix returned with `ucs2.ErrDanglingSurrogate` for reassembly. Other unpaired surrogates still decode as U+FFFD. |
+| Malformed string UTF-8 is rejected; UCS2/UTF-16 odd lengths return decoded complete units with `ucs2.ErrInvalidLength` (TS 23.038 §6.2.3). | Check errors from setters and getters with `errors.Is` / `errors.As` and retain returned text. Never carry an odd final octet into another segment (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). A high surrogate before that octet becomes U+FFFD with only `ucs2.ErrInvalidLength`; only an even-length final high surrogate returns `ucs2.ErrDanglingSurrogate` with bytes that a later segment may complete. |
 
 ### Request stores and callbacks
 

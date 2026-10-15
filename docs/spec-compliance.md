@@ -669,10 +669,16 @@ skipped before returning payload and retained on marshal.
 A declared header that exceeds the short_message field still produces a
 message-length error.
 
-UDH concatenation uses the last concatenation IE (TS 23.040 §9.2.3.24).
-Receivers must ignore concatenation information when total or sequence is zero,
-or sequence exceeds total (§9.2.3.24.1; 16-bit references in §9.2.3.24.8). The
-receive examples enforce these bounds before indexing reassembly buffers.
+`UDH.GetConcatInfo` delegates interpretation to go-sms's
+`tpdu.UserDataHeader.ConcatInfo`. It ignores concatenation IEs with the wrong
+length, zero total or sequence, or sequence greater than total (TS 23.040
+§§9.2.3.24.1, 9.2.3.24.8), then selects the last applicable valid 8-bit or
+16-bit IE (§9.2.3.24). An invalid final IE no longer hides an earlier valid
+one. An 8-bit reference is returned as that octet in `mref`; a 16-bit reference
+uses the full `uint16`. With no valid IE, all values are zero and `found=false`.
+The receive examples use the same result, including its reference width, for
+reassembly. Splitting still strips all caller concatenation IEs before
+creating new metadata; it does not interpret them as received information.
 
 ### Splitting budgets
 
@@ -759,6 +765,20 @@ limitations](#known-limitations).
 The default alphabet and extension table use TS 23.038 §§6.2.1–6.2.1.1 and the
 versions in the baseline above. National-language single/locking shift tables
 are specified in §6.2.1.2 and Annex A.
+
+`data.FindEncoding` tries go-sms's `gsm7.Encode` with its default alphabet and
+default extension table (TS 23.038 §§6.2.1–6.2.1.1). It selects `GSM7BIT` only
+if both that default-table check and the actual `GSM7BIT` codec accept the text;
+otherwise it selects `UCS2`. This also applies when the public `GSM7BIT`
+variable has been replaced: replacing it with `ASCII` makes `£` select UCS2,
+so the returned codec can encode and split it. With the initial codec, `£`,
+`é`, `Δ` and `€` select GSM7, while backtick, ESC, controls outside the alphabet,
+CJK and emoji select UCS2.
+Extension characters consume two septets. Empty text selects GSM7 when its
+codec accepts it; invalid UTF-8 selects UCS2 but remains invalid input to its encoder. No national
+language tables are considered: an `Encoding` alone cannot supply the required
+NLI IEs. This corrects the former ASCII test; 80 `£` characters now occupy one
+segment instead of two. See the [behavior-change table](../README.md#pdus-and-encoding).
 
 Default-alphabet conversion uses `github.com/gomaja/go-sms/encoding/gsm7`.
 Unpacked receive follows its permissive policy: an unassigned extension uses

@@ -192,3 +192,107 @@ func TestReferenceWidthsAreIndependent(t *testing.T) {
 		t.Fatalf("16-bit completion = %q, %t, %v", text, ready, err)
 	}
 }
+
+// Invalid trailing IEs must not change the selected reference width or hide
+// earlier valid metadata (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8).
+func TestLastApplicableConcatReference(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wide bool
+		tail pdu.InfoElement
+	}{
+		{"short_16bit_after_8bit", false, pdu.InfoElement{ID: 8, Data: []byte{7}}},
+		{"invalid_16bit_after_8bit", false, pdu.NewIEConcatMessage16Bit(0, 0, 7)},
+		{"short_8bit_after_16bit", true, pdu.InfoElement{ID: 0, Data: []byte{7}}},
+		{"invalid_8bit_after_16bit", true, pdu.NewIEConcatMessage(0, 0, 7)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var receiver Receiver
+			first := part(t, "A", 2, 1, 7, false)
+			last := part(t, "B", 2, 2, 7, false)
+			var firstIE, lastIE pdu.InfoElement
+			if tc.wide {
+				firstIE = pdu.NewIEConcatMessage16Bit(2, 1, 7)
+				lastIE = pdu.NewIEConcatMessage16Bit(2, 2, 7)
+			} else {
+				firstIE = pdu.NewIEConcatMessage(2, 1, 7)
+				lastIE = pdu.NewIEConcatMessage(2, 2, 7)
+			}
+			if err := first.Message.SetUDH(pdu.UDH{firstIE, tc.tail}); err != nil {
+				t.Fatal(err)
+			}
+			if err := last.Message.SetUDH(pdu.UDH{lastIE}); err != nil {
+				t.Fatal(err)
+			}
+			if text, ready, err := receiver.Add(first); err != nil || ready || text != "" {
+				t.Fatalf("first part = %q, %t, %v; want pending", text, ready, err)
+			}
+			if text, ready, err := receiver.Add(last); err != nil || !ready || text != "AB" {
+				t.Fatalf("last part = %q, %t, %v; want AB", text, ready, err)
+			}
+		})
+	}
+}
+
+// TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8: unrelated IEs do not
+// interrupt selection, and malformed IEs on either side do not replace it.
+func TestReceiverInterleavedConcat(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header pdu.UDH
+		wire   []byte
+		tail   pdu.InfoElement
+	}{
+		{
+			"interleaved_8bit",
+			pdu.UDH{{ID: 0x70, Data: []byte{0xaa}}, pdu.NewIEConcatMessage16Bit(3, 2, 0x5678), {ID: 0x71}, pdu.NewIEConcatMessage(2, 1, 7), {ID: 0x72, Data: []byte{0}}, {ID: 8, Data: []byte{0x12}}, {ID: 0x73}},
+			[]byte{24, 0x70, 1, 0xaa, 8, 4, 0x56, 0x78, 3, 2, 0x71, 0, 0, 3, 7, 2, 1, 0x72, 1, 0, 8, 1, 0x12, 0x73, 0},
+			pdu.NewIEConcatMessage(2, 2, 7),
+		},
+		{
+			"interleaved_16bit",
+			pdu.UDH{{ID: 0x70, Data: []byte{0xaa}}, pdu.NewIEConcatMessage(3, 2, 9), {ID: 0x71}, pdu.NewIEConcatMessage16Bit(2, 1, 0x1234), {ID: 0x72, Data: []byte{0}}, {ID: 0, Data: []byte{7}}, {ID: 0x73}},
+			[]byte{24, 0x70, 1, 0xaa, 0, 3, 9, 3, 2, 0x71, 0, 8, 4, 0x12, 0x34, 2, 1, 0x72, 1, 0, 0, 1, 7, 0x73, 0},
+			pdu.NewIEConcatMessage16Bit(2, 2, 0x1234),
+		},
+		{
+			"malformed_before_8bit",
+			pdu.UDH{{ID: 0x70}, {ID: 8, Data: []byte{0x12}}, {ID: 0x71}, pdu.NewIEConcatMessage(2, 1, 7), {ID: 0x72}},
+			[]byte{14, 0x70, 0, 8, 1, 0x12, 0x71, 0, 0, 3, 7, 2, 1, 0x72, 0},
+			pdu.NewIEConcatMessage(2, 2, 7),
+		},
+		{
+			"malformed_before_16bit",
+			pdu.UDH{{ID: 0x70}, {ID: 0, Data: []byte{7}}, {ID: 0x71}, pdu.NewIEConcatMessage16Bit(2, 1, 0x1234), {ID: 0x72}},
+			[]byte{15, 0x70, 0, 0, 1, 7, 0x71, 0, 8, 4, 0x12, 0x34, 2, 1, 0x72, 0},
+			pdu.NewIEConcatMessage16Bit(2, 2, 0x1234),
+		},
+	} {
+		for _, mode := range []string{"constructed", "received"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				var receiver Receiver
+				first := part(t, "A", 2, 1, 7, false)
+				if mode == "received" {
+					// Literal UDH and payload; no production marshaler builds the fixture.
+					wire := append([]byte{0, 0, byte(len(tc.wire) + 1)}, tc.wire...)
+					wire = append(wire, 'A')
+					if err := first.Message.Unmarshal(pdu.NewBuffer(wire), true); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := first.Message.SetUDH(tc.header); err != nil {
+					t.Fatal(err)
+				}
+				last := part(t, "B", 2, 2, 7, false)
+				if err := last.Message.SetUDH(pdu.UDH{tc.tail}); err != nil {
+					t.Fatal(err)
+				}
+				if text, ready, err := receiver.Add(first); err != nil || ready || text != "" {
+					t.Fatalf("first part = %q, %t, %v; want pending", text, ready, err)
+				}
+				if text, ready, err := receiver.Add(last); err != nil || !ready || text != "AB" {
+					t.Fatalf("last part = %q, %t, %v; want AB", text, ready, err)
+				}
+			})
+		}
+	}
+}

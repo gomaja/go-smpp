@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gomaja/go-smpp/data"
+	"github.com/gomaja/go-sms/encoding/tpdu"
 )
 
 // This package supports message uses of UDH for message concatenation.
@@ -151,27 +152,18 @@ func (u UDH) FindInfoElement(id byte) (ie *InfoElement, found bool) {
 	return nil, false
 }
 
-// GetConcatInfo returns the last concatenation IE (TS 23.040 §9.2.3.24),
-// For 8-bit reference, mref will be a byte value (0-255)
-// For 16-bit reference, mref will be a uint16 value (0-65535)
+// GetConcatInfo returns the last applicable concatenation IE (TS 23.040
+// §9.2.3.24). IEs with the wrong length, zero total or sequence, or sequence
+// greater than total are ignored (§§9.2.3.24.1, 9.2.3.24.8).
+// For an 8-bit reference, mref is that octet (0–255); a 16-bit reference
+// occupies the full uint16 range (0–65535).
 func (u UDH) GetConcatInfo() (totalParts, partNum byte, mref uint16, found bool) {
-	// TS 23.040 §9.2.3.24: repeated concatenation IEs use the last occurrence.
-	for i := len(u) - 1; i >= 0; i-- {
-		ie := u[i]
-		switch ie.ID {
-		case data.UDH_CONCAT_MSG_8_BIT_REF:
-			if len(ie.Data) != 3 {
-				return
-			}
-			return ie.Data[1], ie.Data[2], uint16(ie.Data[0]), true
-		case data.UDH_CONCAT_MSG_16_BIT_REF:
-			if len(ie.Data) != 4 {
-				return
-			}
-			return ie.Data[2], ie.Data[3], uint16(ie.Data[0])<<8 | uint16(ie.Data[1]), true
-		}
+	header := make(tpdu.UserDataHeader, len(u))
+	for i, ie := range u {
+		header[i] = tpdu.InformationElement{ID: ie.ID, Data: ie.Data}
 	}
-	return
+	info, found := header.ConcatInfo()
+	return byte(info.Total), byte(info.Seqno), uint16(info.Ref), found
 }
 
 // InfoElement represent a 3 parts Information-Element

@@ -62,6 +62,9 @@ func (c *SubmitMulti) Marshal(b *ByteBuffer) {
 		_ = b.WriteCString(c.ServiceType)
 		c.SourceAddr.Marshal(b)
 		_ = c.DestAddrs.Marshal(b)
+		if c.Message.udHeader.hasNationalLanguage() {
+			c.EsmClass |= data.SM_UDH_GSM
+		}
 		_ = b.WriteByte(c.EsmClass)
 		_ = b.WriteByte(c.ProtocolID)
 		_ = b.WriteByte(c.PriorityFlag)

@@ -6,6 +6,7 @@ import (
 	stderrors "errors"
 	"reflect"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gomaja/go-smpp/data"
 )
@@ -252,6 +253,18 @@ func FuzzUDHParse(f *testing.F) {
 	for _, seed := range [][]byte{
 		{}, {2, 0, 3, 'A', 'B', 'C', 'D'}, {6, 0, 3, 1, 2, 1, 0x70, 'A'},
 		{5, 0, 3, 1, 2, 1}, {6, 8, 4, 0, 1, 2, 1}, {2, 0x70, 0, 'A'}, {4, 0, 3, 1, 2, 'h', 'i'}, {1, 0}, {0},
+		// TS 23.040 sections 9.2.3.24.15–16: single/locking NLIs,
+		// repeats, reserved selectors, and a bounded truncated final IE.
+		{3, 0x25, 1, 1, 0x0b}, {3, 0x24, 1, 2, 0x1b, 0x41},
+		{3, 0x25, 1, 3, 4}, {3, 0x25, 1, 6, 3},
+		{6, 0x25, 1, 1, 0x25, 1, 255, 4},
+		{6, 0x25, 1, 1, 0x24, 1, 1, 0x0b, 0x1b, 0x14},
+		{3, 0x25, 1, 0, 4}, {6, 0x25, 1, 6, 0x24, 2, 1, 3},
+		// Packed Turkish H4/fill3: terminal @/zero spare, CR spare,
+		// and doubled CR (TS 23.038 §6.1.2.3.1).
+		{3, 0x25, 1, 1, 0x08, 0x06, 0x83, 0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x01},
+		{3, 0x25, 1, 1, 0x08, 0x06, 0x83, 0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x1b},
+		{3, 0x25, 1, 1, 0x08, 0x06, 0x83, 0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x1b, 0x0d},
 	} {
 		f.Add(seed)
 	}
@@ -272,6 +285,13 @@ func FuzzUDHParse(f *testing.F) {
 			if 1+int(raw[0]) <= len(raw) {
 				if err != nil {
 					t.Fatalf("bounded UDH must preserve PDU and payload: %v", err)
+				}
+				message := &parsed.(*SubmitSM).Message
+				for _, codec := range []data.Encoding{data.GSM7BIT, data.GSM7BITPACKED} {
+					text, err := message.GetMessageWithEncoding(codec)
+					if err != nil || !utf8.ValidString(text) {
+						t.Fatalf("bounded GSM7 UDH decoding: %q, %v", text, err)
+					}
 				}
 				round := NewBuffer(nil)
 				parsed.Marshal(round)

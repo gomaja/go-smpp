@@ -314,7 +314,14 @@ func TestShortMessageOddUCS2(t *testing.T) {
 	for _, coding := range []struct {
 		name string
 		enc  data.Encoding
-	}{{"UCS2", data.UCS2}, {"UCS2Strict", data.UCS2Strict}} {
+	}{
+		{"UCS2", data.UCS2},
+		{"UCS2Strict", data.UCS2Strict},
+		{"CustomUCS2_08", data.NewCustomEncoding(0x08, data.UCS2)},
+		{"CustomUCS2Strict_08", data.NewCustomEncoding(0x08, data.UCS2Strict)},
+		{"CustomUCS2_00", data.NewCustomEncoding(0, data.UCS2)},
+		{"CustomUCS2Strict_00", data.NewCustomEncoding(0, data.UCS2Strict)},
+	} {
 		for _, header := range []struct {
 			name string
 			udh  UDH
@@ -354,6 +361,64 @@ func TestShortMessageOddUCS2(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestCustomEncodingOddUCS2Decode(t *testing.T) {
+	for _, coding := range []struct {
+		name string
+		enc  data.Encoding
+	}{{"UCS2", data.UCS2}, {"UCS2Strict", data.UCS2Strict}} {
+		for _, wireCoding := range []byte{0, 0x08} {
+			t.Run(fmt.Sprintf("%s/%02x", coding.name, wireCoding), func(t *testing.T) {
+				custom := data.NewCustomEncoding(wireCoding, coding.enc)
+				text, err := custom.Decode([]byte{0, 0x41, 0xd8, 0x3d, 0xde})
+				require.Equal(t, "A\ufffd", text)
+				require.ErrorIs(t, err, smsucs2.ErrInvalidLength)
+				var dangling smsucs2.ErrDanglingSurrogate
+				require.NotErrorAs(t, err, &dangling)
+			})
+		}
+	}
+}
+
+// TS 23.038 §6.2.3; TS 23.040 §§9.2.3.24.1, 9.2.3.24.8: preserve
+// received octets so decoding can report an incomplete 16-bit unit.
+func TestShortMessageUnmarshalOddUCS2(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		field   []byte
+		payload []byte
+		want    string
+	}{
+		{
+			"prefix",
+			[]byte{0x08, 0, 9, 5, 0, 3, 7, 2, 1, 0, 0x41, 0},
+			[]byte{0, 0x41, 0},
+			"A",
+		},
+		{
+			"high_before_final_octet",
+			[]byte{0x08, 0, 11, 5, 0, 3, 7, 2, 1, 0, 0x41, 0xd8, 0x3d, 0xde},
+			[]byte{0, 0x41, 0xd8, 0x3d, 0xde},
+			"A\ufffd",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var message ShortMessage
+			require.NoError(t, message.Unmarshal(NewBuffer(tc.field), true))
+			payload, err := message.GetMessageData()
+			require.NoError(t, err)
+			require.Equal(t, tc.payload, payload)
+			text, err := message.GetMessage()
+			require.Equal(t, tc.want, text)
+			require.ErrorIs(t, err, smsucs2.ErrInvalidLength)
+			var dangling smsucs2.ErrDanglingSurrogate
+			require.NotErrorAs(t, err, &dangling)
+			encoded := NewBuffer(nil)
+			require.NoError(t, message.Marshal(encoded))
+			require.Equal(t, tc.field, encoded.Bytes())
+		})
 	}
 }
 

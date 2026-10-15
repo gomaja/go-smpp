@@ -63,7 +63,7 @@ func handlePDU() func(pdu.PDU) (pdu.PDU, bool) {
 		if delivery, ok := p.(*pdu.DeliverSM); ok {
 			text, ready, err := receiver.Add(delivery)
 			if err != nil {
-				log.Print(err)
+				log.Printf("partial message %q: %v", text, err)
 			} else if ready {
 				log.Print(text)
 			}

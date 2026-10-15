@@ -104,11 +104,7 @@ func (u UDH) hasNationalLanguage() bool {
 // reserved identifiers and Spanish locking (TS 23.038 sections 6.2.1.2.4–5;
 // TS 23.040 sections 9.2.3.24.15–16).
 func decodeGSM7WithUDH(septets []byte, udh UDH) (string, error) {
-	header := make(tpdu.UserDataHeader, len(udh))
-	for i, ie := range udh {
-		header[i] = tpdu.InformationElement{ID: ie.ID, Data: ie.Data}
-	}
-	text, err := tpdu.DecodeUserData(septets, header, tpdu.Alpha7Bit, tpdu.WithAllCharsets)
+	text, err := tpdu.DecodeUserData(septets, udh.smsHeader(), tpdu.Alpha7Bit, tpdu.WithAllCharsets)
 	return string(text), err
 }
 

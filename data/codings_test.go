@@ -660,6 +660,25 @@ func TestUCS2SplitEncodedOctetBoundaries(t *testing.T) {
 	}
 }
 
+func TestUCS2ShouldSplitEncodedLength(t *testing.T) {
+	for _, enc := range []Encoding{UCS2, UCS2Strict} {
+		for _, text := range []string{
+			"", strings.Repeat("a", 70), strings.Repeat("a", 71),
+			strings.Repeat("a", 67), strings.Repeat("a", 68),
+			strings.Repeat("a", 68) + "😀", strings.Repeat("a", 69) + "😀",
+			strings.Repeat("a", 65) + "😀", strings.Repeat("a", 66) + "😀",
+			strings.Repeat("😀", 35), strings.Repeat("😀", 36),
+			string([]byte{0xff}), "a" + string([]byte{0xe2, 0x82}),
+		} {
+			for _, limit := range []uint{0, 1, 2, 3, 4, 133, 134, 135, 139, 140, 141, 142} {
+				encoded, err := enc.Encode(text)
+				require.Equal(t, err == nil && uint(len(encoded)) > limit,
+					enc.(Splitter).ShouldSplit(text, limit), "text=%q limit=%d", text, limit)
+			}
+		}
+	}
+}
+
 func TestASCIIRejectsUnrepresentableText(t *testing.T) {
 	for _, text := range []string{"é", "😀", string([]byte{0xff})} {
 		encoded, err := ASCII.Encode(text)

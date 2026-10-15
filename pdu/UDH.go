@@ -1,7 +1,6 @@
 package pdu
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/gomaja/go-smpp/data"
@@ -18,7 +17,8 @@ type UDH []InfoElement
 
 // UDHL returns length (octets) of encoded UDH, including the UDHL byte.
 //
-// If there is no InfoElement (IE), returns 0. If total length exceed 255, return -1.
+// If there is no InfoElement (IE), returns 0. If the body exceeds 255 octets,
+// returns -1; a 255-octet body has an encoded length of 256.
 func (u UDH) UDHL() (l int) {
 	if len(u) == 0 {
 		return
@@ -44,10 +44,6 @@ func (u UDH) UDHL() (l int) {
 // MarshalBinary marshal UDH into bytes array
 // The first byte is UDHL
 // MarshalBinary preserve InformationElement order as they appears in the UDH
-//
-// If the total UDHL is larger than what length(byte) can specified,
-// this will truncate IE until total length fit within 256, if you want to
-// check if any IE has been truncated, see if UDHL() < -1, notes on UDHL()
 func (u UDH) MarshalBinary() (b []byte, err error) {
 	reservedLength := u.UDHL()
 	if reservedLength == -1 {
@@ -58,37 +54,8 @@ func (u UDH) MarshalBinary() (b []byte, err error) {
 		return
 	}
 
-	// reserve the first byte for UDHL
-	buf := bytes.NewBuffer(make([]byte, 1, reservedLength))
-
-	// marshalling elements
-	length := 0
-	for i := 0; i < len(u); i++ {
-		// Begin marshaling UDH data, each IE is composed of 3 parts:
-		//		[ ID_1, LENGTH_1, DATA_N ]
-		// When adding a new IE, if total length ID + LEN + DATA
-		// exceed 256, we skip that IE altogether
-		addition := 2 + len(u[i].Data)
-
-		// limit exceeded, break loop?
-		if length += addition; length > 255 {
-			length -= addition
-			break
-		}
-
-		buf.WriteByte(u[i].ID)
-		buf.WriteByte(byte(len(u[i].Data)))
-		buf.Write(u[i].Data)
-	}
-
-	// only set buffer when UDHL length is not zero
-	if length > 0 {
-		// final assignment and encode length
-		b = buf.Bytes()
-		b[0] = byte(length)
-	}
-
-	return
+	// TS 23.040 §9.2.3.24: go-sms owns complete-header serialization.
+	return u.smsHeader().MarshalBinary()
 }
 
 // UnmarshalBinary reads the InformationElements from raw binary UDH.
@@ -99,47 +66,40 @@ func (u UDH) MarshalBinary() (b []byte, err error) {
 //
 // Since UDHL can only represented in 1 byte, UnmarshalBinary
 // will only read up to a maximum of 256 byte regardless of src length
+// Parsed IE data is copied by go-sms and does not alias src. Empty or ignored
+// headers return an error without changing the receiver.
 func (u *UDH) UnmarshalBinary(src []byte) (int, error) {
-	if len(src) < 1 {
-		return 0, fmt.Errorf("decode error UDHL %d underflow", 0)
+	// TS 23.040 §9.2.3.24: parse within UDHL and ignore the whole header
+	// on a malformed final IE. This public facade requires a nonempty header.
+	var header tpdu.UserDataHeader
+	n, err := header.UnmarshalBinary(src)
+	if err != nil {
+		return 0, err
 	}
-
-	udhl := int(src[0])
-	if udhl == 0 {
-		return 0, fmt.Errorf("error: UDHL length is 0, probably sender mistake forgot to include UDH but still set UDH flag in ESME_CLASS")
+	if len(header) == 0 {
+		return 0, fmt.Errorf("invalid or ignored UDH")
 	}
+	*u = udhFromSMS(header)
+	return n, nil
+}
 
-	// check length, excluding first UDHL byte
-	if len(src)-1 < udhl {
-		return 0, fmt.Errorf("decode error UDH underflow, expect len %d got %d", udhl, len(src))
+func (u UDH) smsHeader() tpdu.UserDataHeader {
+	if len(u) == 0 {
+		return nil
 	}
-
-	// count number of bytes which are read
-	var (
-		read = 1 // UDHL byte
-	)
-
-	ies := []InfoElement{}
-	// TS 23.040 §9.2.3.24: UDHL covers only the header after the
-	// length octet. An IE cannot borrow bytes from the message payload.
-	end := 1 + udhl
-	for read < end {
-		ie := InfoElement{}
-
-		r, err := ie.UnmarshalBinary(src[read:end])
-		if err != nil {
-			return 0, err
-		}
-
-		// moving forward
-		read += r
-
-		// add info elements
-		ies = append(ies, ie)
+	header := make(tpdu.UserDataHeader, len(u))
+	for i, ie := range u {
+		header[i] = tpdu.InformationElement(ie)
 	}
+	return header
+}
 
-	*u = UDH(ies)
-	return read, nil
+func udhFromSMS(header tpdu.UserDataHeader) UDH {
+	u := make(UDH, len(header))
+	for i, ie := range header {
+		u[i] = InfoElement(ie)
+	}
+	return u
 }
 
 // FindInfoElement find the first occurrence of the Information Element with id
@@ -158,11 +118,7 @@ func (u UDH) FindInfoElement(id byte) (ie *InfoElement, found bool) {
 // For an 8-bit reference, mref is that octet (0–255); a 16-bit reference
 // occupies the full uint16 range (0–65535).
 func (u UDH) GetConcatInfo() (totalParts, partNum byte, mref uint16, found bool) {
-	header := make(tpdu.UserDataHeader, len(u))
-	for i, ie := range u {
-		header[i] = tpdu.InformationElement{ID: ie.ID, Data: ie.Data}
-	}
-	info, found := header.ConcatInfo()
+	info, found := u.smsHeader().ConcatInfo()
 	return byte(info.Total), byte(info.Seqno), uint16(info.Ref), found
 }
 
@@ -198,6 +154,7 @@ func NewIEConcatMessage16Bit(totalParts, partNum byte, mref uint16) InfoElement 
 //
 //	[ ID_1, LENGTH_1, DATA_N ]
 func (ie *InfoElement) UnmarshalBinary(src []byte) (int, error) {
+	// Standalone IE decoding stays local pending https://github.com/gomaja/go-sms/issues/26.
 	if len(src) < 2 {
 		return 0, fmt.Errorf("decode error InfoElement underflow, len = %d", len(src))
 	}

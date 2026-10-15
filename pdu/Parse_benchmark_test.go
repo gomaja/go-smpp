@@ -87,6 +87,7 @@ func benchmarkParseFrames() []struct {
 	}{
 		{"submit_sm", benchmarkSubmitSM()},
 		{"deliver_sm", benchmarkDeliverSM()},
+		{"deliver_sm_udh", udhFrame(0x00000005, []byte{5, 0, 3, 7, 2, 1, 'A'}, true)},
 		{"enquire_link", benchmarkFrame(0x15, nil)},
 		{"submit_sm_resp", benchmarkFrame(0x80000004, []byte("0123456789\x00"))},
 		{"submit_multi_resp", benchmarkFrame(0x80000021, []byte("mid\x00\x02\x01\x01a\x00\x00\x00\x00\x0b\x02\x09b\x00\x80\x00\x00\x01"))},
@@ -99,10 +100,11 @@ func BenchmarkParse(b *testing.B) {
 	}
 }
 
-// Budgets measured on origin/main with these same independent fixtures.
+// Budgets measured with these independent fixtures. The UDH deliver_sm budget
+// includes copied IE data and conversion to the public header type.
 func TestParseAllocationBudget(t *testing.T) {
 	budgets := map[string]float64{
-		"submit_sm": 28, "deliver_sm": 26, "enquire_link": 9,
+		"submit_sm": 28, "deliver_sm": 26, "deliver_sm_udh": 20, "enquire_link": 9,
 		"submit_sm_resp": 12, "submit_multi_resp": 18,
 	}
 	for _, tc := range benchmarkParseFrames() {
@@ -115,7 +117,7 @@ func TestParseAllocationBudget(t *testing.T) {
 				}
 			})
 			if allocs > budgets[tc.name] {
-				t.Errorf("Parse allocated %.0f times; origin/main budget is %.0f", allocs, budgets[tc.name])
+				t.Errorf("Parse allocated %.0f times; budget is %.0f", allocs, budgets[tc.name])
 			}
 		})
 	}

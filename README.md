@@ -790,6 +790,32 @@ earlier slice returned by `GetOptionalParameters`.
 The server advertises `pdu.TagScInterfaceVersion` on successful v3.4-or-later
 binds; older peers do not receive that TLV.
 
+### User data headers
+
+Complete UDH parsing and marshalling use go-sms's `tpdu.UserDataHeader`
+(TS 23.040 §9.2.3.24). The `pdu.UDH` and `pdu.InfoElement` API, constructors,
+first-occurrence pointer lookup and concatenation lookup remain available.
+`UDHL()` includes the length octet, returns zero without IEs and returns -1
+when the body exceeds 255 octets. Empty headers are omitted on send.
+
+The public `UDH.UnmarshalBinary` facade requires at least one well-formed IE;
+an empty or ignored header returns an error without changing the receiver.
+Parsed IE data is copied by go-sms and does not alias the input. Zero-length
+IE data may be nil. Standalone `InfoElement.UnmarshalBinary` retains its
+local decoder and borrowed data pending [go-sms issue 26](https://github.com/gomaja/go-sms/issues/26).
+
+SMPP framing stays in go-smpp. With UDHI set and a nonempty message field,
+`ShortMessage` parses only the declared header span. It preserves `00` and
+headers with a malformed final IE byte for byte in `IgnoredUDH()`, skips
+their declared span and exposes no parsed `UDH()`. A span beyond the message
+field remains an error. The result is committed only after framing succeeds,
+and preserved header bytes take precedence when forwarding the message.
+
+Header-capacity arithmetic and chunking remain local pending
+[go-sms issue 24](https://github.com/gomaja/go-sms/issues/24) and
+[issue 25](https://github.com/gomaja/go-sms/issues/25). These track field-level
+APIs that avoid introducing TPDU segmentation into SMPP framing.
+
 ### Long messages and splitting
 
 Use `SetLongMessageWithEnc` followed by `SubmitSM.Split`, or
@@ -901,6 +927,7 @@ implementations as follows. The contracts above describe the resulting behavior.
 | `data.SMPP_V33` changes from `-0x33` to `0x33`; `OPT_PAR_MSG_WAIT` from `0x0002` to `0x0030`; `OPT_PAR_QOS_TIME_TO_LIVE_MIN` from `1` to `4`. | Use the named constants and update literal comparisons or lengths to the corrected values. |
 | Outside `0x00`–`0x0f`, `FromDataCoding` delegates TP-DCS classification, including reserved bits, to go-sms. | Keep SMPP direct values separate from TP-DCS. `0xe4`–`0xe7` / `0xec`–`0xef` now select UCS2; `0xfc`–`0xff` now select binary. Reserved codings fall back to GSM and defined compressed alphabets remain binary. |
 | `UDH.GetConcatInfo` ignores invalid concatenation IEs and returns the last applicable valid IE. | A wrong-length IE, zero total or sequence, or sequence greater than total no longer hides an earlier valid IE. Receive examples use the same selection for reference width (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8). |
+| `UDH.UnmarshalBinary` takes copied IE data from go-sms; zero-length IE data may be nil. | Mutating the parse input no longer changes decoded IE data. Treat nil and empty IE data alike. Standalone `InfoElement.UnmarshalBinary` still borrows its input. Empty or ignored headers still fail the strict UDH facade; malformed-final-IE errors now use a generic message. |
 | `data.FindEncoding` selects GSM7 by encodability in the default alphabet and default extension table, rather than ASCII membership. | `£`, `é`, `Δ` and `€` now select GSM7; backtick, ESC and controls outside the alphabet select UCS2. Extension characters consume two septets. If `GSM7BIT` has been replaced, that codec must also encode the text; for example, replacing it with `ASCII` makes `£` select UCS2. No national language tables are selected because the helper cannot return their IEs. With the initial codec, empty text selects GSM7; invalid UTF-8 selects UCS2, whose encoder still rejects it. 80 `£` characters now fit one segment instead of two (TS 23.038 §§6.2.1–6.2.1.1). |
 | GSM7 text setters reject caller-supplied NLI IEs that conflict with the selected tables. | Select tables with `NewGSM7` and matching NLI IEs; rebuild the message when changing a previously selected table. |
 | GSM7 `ShortMessage.GetMessage` now honors received NLI IEs. | Decode each part using its own UDH; select packed representation explicitly for peers that use it. |

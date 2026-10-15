@@ -859,10 +859,15 @@ go-sms errors. Strict encoding returns `ucs2.ErrUnencodable` for a supplementary
 character.
 
 Both decode with `ucs2.Decode`, which accepts UTF-16 surrogate pairs. An odd
-byte length returns `ucs2.ErrInvalidLength` without decoded text. A final high
-surrogate returns the preceding decoded text and `ucs2.ErrDanglingSurrogate`,
-whose bytes may be completed by a later segment. Other unpaired surrogates
-become U+FFFD individually. RFC 2781 §2.2 leaves malformed-input recovery
+byte length returns the text decoded from complete 16-bit units together with
+`ucs2.ErrInvalidLength` (TS 23.038 §6.2.3). The final octet is neither decoded
+nor carried into the next segment: a UCS2 character must not be split in the
+middle (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). A high surrogate before that
+octet becomes U+FFFD, and only `ucs2.ErrInvalidLength` is returned, never
+`ucs2.ErrDanglingSurrogate`. An even-length payload ending in a high surrogate
+returns the preceding decoded text and `ucs2.ErrDanglingSurrogate`, whose bytes
+may be completed by a later segment. Other unpaired surrogates become U+FFFD
+individually. RFC 2781 §2.2 leaves malformed-input recovery
 unspecified; the previous x/text replacement behavior is not reproduced for
 odd lengths or a final high surrogate. The fixed big-endian path does not
 strip a BOM or switch byte order (RFC 2781 §3.3).

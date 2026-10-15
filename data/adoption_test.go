@@ -136,7 +136,7 @@ func TestAdoptionUCS2DecodeErrors(t *testing.T) {
 		dangling []byte
 	}{
 		{"odd", []byte{0}, "", true, nil},
-		{"odd discards prefix", []byte{0, 0x41, 0}, "", true, nil},
+		{"odd preserves prefix", []byte{0, 0x41, 0}, "A", true, nil},
 		{"high", []byte{0xd8, 0}, "", false, []byte{0xd8, 0}},
 		{"A high", []byte{0, 0x41, 0xd8, 0}, "A", false, []byte{0xd8, 0}},
 		{"low high", []byte{0xdc, 0, 0xd8, 0}, "\ufffd", false, []byte{0xd8, 0}},
@@ -217,7 +217,7 @@ func TestAdoptionUCS2Strict(t *testing.T) {
 			t.Errorf("%T prefix=%q,%T %v", enc, got, err, err)
 		}
 		got, err = enc.Decode([]byte{0, 0x41, 0})
-		if got != "" || !errors.Is(err, ucs2.ErrInvalidLength) {
+		if got != "A" || !errors.Is(err, ucs2.ErrInvalidLength) {
 			t.Errorf("%T odd=%q,%T %v", enc, got, err, err)
 		}
 	}

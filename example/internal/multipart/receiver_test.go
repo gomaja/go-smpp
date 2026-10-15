@@ -1,11 +1,64 @@
 package multipart
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-smpp/data"
 	"github.com/gomaja/go-smpp/pdu"
+	"github.com/gomaja/go-sms/encoding/ucs2"
 )
+
+func TestOddUCS2ReturnsTextWithoutReassembly(t *testing.T) {
+	for _, coding := range []struct {
+		name string
+		enc  data.Encoding
+	}{{"UCS2", data.UCS2}, {"UCS2Strict", data.UCS2Strict}} {
+		for _, sar := range []bool{false, true} {
+			for _, tc := range []struct {
+				name string
+				wire []byte
+				want string
+			}{
+				{"prefix", []byte{0, 0x41, 0}, "A"},
+				{"high_before_final_octet", []byte{0, 0x41, 0xd8, 0x3d, 0xde}, "A\ufffd"},
+			} {
+				metadata := "UDH"
+				if sar {
+					metadata = "SAR"
+				}
+				t.Run(coding.name+"/"+metadata+"/"+tc.name, func(t *testing.T) {
+					var receiver Receiver
+					first := part(t, "", 2, 1, 7, sar)
+					if err := first.Message.SetMessageDataWithEncoding(tc.wire, coding.enc); err != nil {
+						t.Fatal(err)
+					}
+					text, ready, err := receiver.Add(first)
+					var dangling ucs2.ErrDanglingSurrogate
+					if text != tc.want || ready || !errors.Is(err, ucs2.ErrInvalidLength) || errors.As(err, &dangling) {
+						t.Fatalf("odd segment = %q, %t, %v; want %q, false, ErrInvalidLength", text, ready, err, tc.want)
+					}
+					// TS 23.040 §§9.2.3.24.1, 9.2.3.24.8: no octet or
+					// surrogate from the malformed segment may enter the next one.
+					tail := part(t, "", 2, 2, 7, sar)
+					if err := tail.Message.SetMessageDataWithEncoding([]byte{0, 0x42}, coding.enc); err != nil {
+						t.Fatal(err)
+					}
+					if text, ready, err := receiver.Add(tail); err != nil || ready || text != "" {
+						t.Fatalf("tail after malformed segment = %q, %t, %v", text, ready, err)
+					}
+					if err := first.Message.SetMessageDataWithEncoding([]byte{0, 0x41}, coding.enc); err != nil {
+						t.Fatal(err)
+					}
+					if text, ready, err := receiver.Add(first); err != nil || !ready || text != "AB" {
+						t.Fatalf("corrected message = %q, %t, %v; want AB", text, ready, err)
+					}
+				})
+			}
+		}
+	}
+}
 
 func part(t *testing.T, text string, total, sequence byte, reference uint16, sar bool) *pdu.DeliverSM {
 	t.Helper()

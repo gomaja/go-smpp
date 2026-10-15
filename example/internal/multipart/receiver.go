@@ -36,10 +36,12 @@ type Receiver struct {
 
 // Add returns completed text, or ready=false while waiting for more parts.
 // Invalid concatenation information is ignored and the text is returned alone.
+// A decoding error returns any decoded text with ready=false; that segment is
+// not retained for reassembly (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8).
 func (r *Receiver) Add(pd *pdu.DeliverSM) (text string, ready bool, err error) {
 	text, err = pd.Message.GetMessage()
 	if err != nil {
-		return "", false, err
+		return text, false, err
 	}
 	udh := pd.Message.UDH()
 	total, sequence, reference, found := udh.GetConcatInfo()

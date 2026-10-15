@@ -21,7 +21,7 @@ func TestUDHDeclaredBoundary(t *testing.T) {
 	n, err := u.UnmarshalBinary([]byte{7, 0, 3, 1, 2, 1, 0x70, 0, 'A'})
 	require.NoError(t, err)
 	require.Equal(t, 8, n)
-	require.Equal(t, UDH{{ID: 0, Data: []byte{1, 2, 1}}, {ID: 0x70, Data: []byte{}}}, u)
+	require.Equal(t, UDH{{ID: 0, Data: []byte{1, 2, 1}}, {ID: 0x70}}, u)
 }
 
 func TestUserDataHeader(t *testing.T) {

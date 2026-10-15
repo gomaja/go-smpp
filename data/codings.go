@@ -488,21 +488,8 @@ func (*ucs2) Decode(src []byte) (string, error) {
 }
 
 func (c *ucs2) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
-	if !utf8.ValidString(text) {
-		return false
-	}
-	if c.strict {
-		encoded, err := c.Encode(text)
-		return err == nil && uint(len(encoded)) > octetLimit
-	}
-	octets := 0
-	for _, r := range text {
-		octets += 2
-		if utf16.RuneLen(r) == 2 {
-			octets += 2
-		}
-	}
-	return uint(octets) > octetLimit
+	encoded, err := c.Encode(text)
+	return err == nil && uint(len(encoded)) > octetLimit
 }
 
 func (c *ucs2) EncodeSplit(text string, octetLimit uint) (allSeg [][]byte, err error) {

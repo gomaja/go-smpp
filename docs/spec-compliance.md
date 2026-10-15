@@ -661,13 +661,45 @@ removal through `OnError`; caller PDUs retain their fields.
 
 ### UDH and concatenation
 
+Complete-header parsing and marshalling delegate to go-sms's
+`tpdu.UserDataHeader` under TS 23.040 V20.0.0 §9.2.3.24. The public `pdu.UDH`
+and `pdu.InfoElement` types, constructors and first-occurrence pointer lookup
+remain in go-smpp. Its `UDHL()` convention includes the length octet: zero
+without IEs, -1 for a body above 255 octets, otherwise body length plus one.
+Nil and empty headers are omitted on send; over-long headers retain the
+existing error.
+
+The [publication archive](https://www.3gpp.org/ftp/Specs/archive/23_series/23.040/)
+and [specification record](https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=747)
+were rechecked on **2026-10-15** for this delegation. Both still identify
+V20.0.0 as current. The [correction register](https://portal.3gpp.org/ChangeRequests.aspx?specnumber=23.040&q=1)
+showed no newer approved correction to §9.2.3.24; proposals without approval
+were not applied.
+
+The strict `UDH.UnmarshalBinary` facade succeeds only for a nonempty,
+well-formed header. Empty (`00`) and ignored headers return an error, consume
+zero bytes and leave the receiver unchanged. Malformed-final-IE errors now
+use a generic message because the dependency reports the whole header as
+ignored. Parsed IE data is go-sms's copy, independent of the source; a
+zero-length IE may have nil data. Standalone `InfoElement.UnmarshalBinary`
+still borrows its input and stays local pending
+[go-sms issue 26](https://github.com/gomaja/go-sms/issues/26), since a standalone
+IE can exceed the representable complete-header size.
+
+SMPP coding, length and UDHI framing stay local (v3.4 §§5.2.19, 5.2.21–22).
+`ShortMessage` attempts header parsing only with UDHI set and a nonempty
+message field, checks the declared span first, then commits the result only
+after framing succeeds. Unlike the strict facade, it preserves `00` as an
+ignored raw header for compatibility.
+
 A bounded UDH with a truncated final information element is ignored as required
 by TS 23.040 §9.2.3.24. `ShortMessage.UDH()` exposes no parsed elements;
 `IgnoredUDH()` exposes the preserved raw header. Its declared header octets are
 skipped before returning payload and retained on marshal.
 
 A declared header that exceeds the short_message field still produces a
-message-length error.
+message-length error. Raw ignored bytes take precedence over parsed IEs for
+both header length and marshalling, preserving the received wire bytes.
 
 `UDH.GetConcatInfo` delegates interpretation to go-sms's
 `tpdu.UserDataHeader.ConcatInfo`. It ignores concatenation IEs with the wrong
@@ -682,6 +714,12 @@ creating new metadata; it does not interpret them as received information.
 
 ### Splitting budgets
 
+Header-capacity arithmetic stays local pending
+[go-sms issue 24](https://github.com/gomaja/go-sms/issues/24); chunking stays
+local pending [issue 25](https://github.com/gomaja/go-sms/issues/25). These
+field-level APIs avoid introducing TPDU envelope and segmentation policy into
+SMPP. Segmentation behavior is unchanged by complete-header delegation.
+
 GSM-alphabet encodings use escape-safe septet budgets. An unpacked GSM7 part
 holds `160 - ceil(headerOctets * 8 / 7)` septets; extension characters consume
 two. The complete header includes caller IEs, NLI IEs and concatenation
@@ -690,6 +728,8 @@ apply to no header or an 8-bit concatenation IE alone; a 16-bit reference and
 additional IEs reduce the available payload further. Packed GSM7 uses the
 actual header fill alignment and accounts for the chosen CR-padding convention.
 
+`data.UCS2.ShouldSplit` compares the selected codec's encoded length and
+returns false on an encoding error, including malformed UTF-8.
 `data.UCS2` uses encoded UTF-16 octets, preserving surrogate pairs;
 `data.UCS2Strict` uses two octets per BMP scalar. The wire coding remains
 `0x08` for both.
@@ -744,7 +784,8 @@ packed messages must decode and re-encode byte-identically. Ambiguous CR tails
 still require retained original source text. Packed splitting uses the same
 go-sms pack/unpack policy to choose boundaries that preserve septets, checks
 the actual octet budget, and keeps escape pairs intact. Segmentation and UDH
-handling remain in go-smpp (TS 23.040 §9.2.3.24.1).
+framing remain in go-smpp; complete-header parsing and marshalling use go-sms
+(TS 23.040 §§9.2.3.24, 9.2.3.24.1).
 
 Multipart packed segmentation may now end a segment on a zero septet because
 the CR receive rule retains it (TS 23.038 §6.1.2.3.1). Part counts and segment

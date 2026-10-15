@@ -8,6 +8,7 @@ import (
 	"github.com/gomaja/go-smpp/data"
 	"github.com/gomaja/go-smpp/errors"
 	"github.com/gomaja/go-sms/encoding/gsm7"
+	"github.com/gomaja/go-sms/encoding/tpdu"
 )
 
 var ref = uint32(0)
@@ -110,8 +111,9 @@ func (c *ShortMessage) UDH() UDH {
 }
 
 // IgnoredUDH returns a copy of a bounded header ignored under TS 23.040
-// §9.2.3.24 because its final information element was truncated. UDH returns
-// no parsed elements for such a header; the original bytes remain on marshal.
+// §9.2.3.24 because its final information element was truncated, or an empty
+// header received as 00. UDH returns no parsed elements for such a header;
+// the original bytes remain on marshal.
 func (c *ShortMessage) IgnoredUDH() []byte { return append([]byte(nil), c.ignoredUDH...) }
 
 func (c *ShortMessage) headerBytes() ([]byte, error) {
@@ -270,6 +272,7 @@ func packedFillBits(headerLength int) int {
 }
 
 func (c *ShortMessage) payloadLimit() int {
+	// Header-capacity arithmetic stays local pending https://github.com/gomaja/go-sms/issues/24.
 	headerLength := c.headerLength()
 	if headerLength < 0 {
 		return -1
@@ -292,6 +295,7 @@ func (c *ShortMessage) payloadLimit() int {
 //
 // A message that fits its encoded budget is returned unchanged.
 func (c *ShortMessage) split() ([]*ShortMessage, error) {
+	// Chunking stays local pending https://github.com/gomaja/go-sms/issues/25.
 	encoding := c.enc
 	if encoding == nil {
 		encoding = data.GSM7BIT
@@ -522,13 +526,17 @@ func (c *ShortMessage) unmarshal(b *ByteBuffer, udhi, withDataCoding bool) (err 
 		if len(next.messageData) < 1+int(next.messageData[0]) {
 			return fmt.Errorf("declared UDH exceeds short_message")
 		}
-		consumed, err := next.udHeader.UnmarshalBinary(next.messageData)
+		var header tpdu.UserDataHeader
+		consumed, err := header.UnmarshalBinary(next.messageData)
 		if err != nil {
+			return err
+		}
+		if len(header) == 0 {
 			// TS 23.040 §9.2.3.24: a truncated final IE causes the whole
-			// bounded UDH to be ignored, while its following payload survives.
-			consumed = 1 + int(next.messageData[0])
+			// bounded UDH to be ignored. Preserve empty headers too.
 			next.ignoredUDH = append([]byte(nil), next.messageData[:consumed]...)
-			next.udHeader = nil
+		} else {
+			next.udHeader = udhFromSMS(header)
 		}
 		next.messageData = next.messageData[consumed:]
 	}

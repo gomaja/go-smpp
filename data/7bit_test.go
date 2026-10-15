@@ -2,41 +2,9 @@ package data
 
 import (
 	"bytes"
-	"encoding/hex"
-	"errors"
-	"fmt"
-	"io"
-	"reflect"
 	"strings"
 	"testing"
-
-	"golang.org/x/text/transform"
 )
-
-// These GSM 7-bit tests cover 3GPP TS 23.038 sections 6.2.1 and 6.2.1.1.
-// Portions of the original test cases are derived from fiorix/go-smpp; see
-// LICENSES/fiorix-go-smpp-MIT.txt.
-
-var validationStringTests = []struct {
-	Text     string
-	Expected []rune
-}{
-	{Text: "12345678", Expected: []rune{}},
-	{Text: "12345[6]", Expected: []rune{}},
-	{Text: "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\f^{}\\[~]|€ÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà", Expected: []rune{}},
-	{Text: "你", Expected: []rune{'你'}},
-}
-
-var validationBufferTests = []struct {
-	Buffer   []byte
-	Expected []byte
-}{
-	{Buffer: []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38}, Expected: []byte{}},
-	{Buffer: []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x1B, 0x3C, 0x36, 0x1B, 0x3E}, Expected: []byte{}},
-	{Buffer: []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x1B}, Expected: []byte{0x1B}},
-	{Buffer: []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x1B, 0x00}, Expected: []byte{}},
-	{Buffer: []byte{0x80, 0x81, 0x82, 0x83}, Expected: []byte{0x80, 0x81, 0x82, 0x83}},
-}
 
 var packedTests = []struct {
 	Text string
@@ -83,216 +51,23 @@ var unpackedTests = []struct {
 	{Text: "@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà", Buff: []byte("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0B\x0C\x0E\x0F\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1A\x1C\x1D\x1E\x1F\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2A\x2B\x2C\x2D\x2E\x2F\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3A\x3B\x3C\x3D\x3E\x3F\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4A\x4B\x4C\x4D\x4E\x4F\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5A\x5B\x5C\x5D\x5E\x5F\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6A\x6B\x6C\x6D\x6E\x6F\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7A\x7B\x7C\x7D\x7E\x7F")},
 }
 
-var invalidCharacterTests = []struct {
-	Packed bool
-	Text   string
-}{
-	{Packed: true, Text: "你"},
-	{Packed: false, Text: "你"},
-}
-
-var invalidByteTests = []struct {
-	Packed bool
-	Buff   []byte
-}{
-	{Packed: false, Buff: []byte{0x80}},
-	{Packed: false, Buff: []byte{0x1B}},
-	{Packed: false, Buff: []byte{0x1B, 0x80}},
-}
-
-func TestGSM7EncodingString(t *testing.T) {
-	tests := []struct {
-		Packed   bool
-		Expected string
-	}{
-		{Packed: true, Expected: "GSM 7-bit (Packed)"},
-		{Packed: false, Expected: "GSM 7-bit (Unpacked)"},
-	}
-
-	for index, row := range tests {
-		actual := fmt.Sprint(GSM7(row.Packed))
-		if actual != row.Expected {
-			t.Fatalf("%d: expected '%s' but got '%s'", index, row.Expected, actual)
+func TestGSM7WireVectors(t *testing.T) {
+	for _, fixture := range []struct {
+		codec Encoding
+		rows  []struct {
+			Text string
+			Buff []byte
 		}
-	}
-}
-
-func TestValidateGSM7String(t *testing.T) {
-	for index, row := range validationStringTests {
-		actual := ValidateGSM7String(row.Text)
-		if !reflect.DeepEqual(actual, row.Expected) {
-			t.Fatalf("%2d: actual did not equal expected.\nactual: %s\nexpect: %s", index, string(actual), string(row.Expected))
-		}
-	}
-}
-
-func TestValidateGSM7Buffer(t *testing.T) {
-	for index, row := range validationBufferTests {
-		actual := ValidateGSM7Buffer(row.Buffer)
-		if !reflect.DeepEqual(actual, row.Expected) {
-			t.Fatalf("%2d: actual did not equal expected.\nactual: %s\nexpect: %s", index, hex.EncodeToString(actual), hex.EncodeToString(row.Expected))
-		}
-	}
-}
-
-func TestPackedEncoder(t *testing.T) {
-	encoder := GSM7(true).NewEncoder()
-	for index, row := range packedTests {
-		es, _, err := transform.Bytes(encoder, []byte(row.Text))
-		if err != nil {
-			t.Fatalf("%2d: unexpected error: '%s'", index, err.Error())
-		}
-		if !reflect.DeepEqual(es, row.Buff) {
-			t.Fatalf("%2d: actual did not equal expected.\nactual: %s\nexpect: %s", index, hex.EncodeToString(es), hex.EncodeToString(row.Buff))
-		}
-	}
-}
-
-func TestUnpackedEncoder(t *testing.T) {
-	encoder := GSM7(false).NewEncoder()
-	for index, row := range unpackedTests {
-		es, _, err := transform.Bytes(encoder, []byte(row.Text))
-		if err != nil {
-			t.Fatalf("%2d: unexpected error: '%s'", index, err.Error())
-		}
-		if !reflect.DeepEqual(es, row.Buff) {
-			t.Fatalf("%2d: actual did not equal expected.\nactual: %s\nexpect: %s", index, hex.EncodeToString(es), hex.EncodeToString(row.Buff))
-		}
-	}
-}
-
-func TestPackedDecoder(t *testing.T) {
-	decoder := GSM7(true).NewDecoder()
-	for index, row := range packedTests {
-		es, _, err := transform.Bytes(decoder, row.Buff)
-		if err != nil {
-			t.Fatalf("%2d: unexpected error: '%s'", index, err.Error())
-		}
-		if string(es) != row.Text {
-			t.Fatalf("%2d: actual did not equal expected.\nactual: %s\nexpect: %s", index, string(es), row.Text)
-		}
-	}
-}
-
-func TestUnpackedDecoder(t *testing.T) {
-	encoder := GSM7(false).NewDecoder()
-	for index, row := range unpackedTests {
-		es, _, err := transform.Bytes(encoder, row.Buff)
-		if err != nil {
-			t.Fatalf("%2d: unexpected error: '%s'", index, err.Error())
-		}
-		if string(es) != row.Text {
-			t.Fatalf("%2d: actual did not equal expected.\nactual: %s\nexpect: %s", index, string(es), row.Text)
-		}
-	}
-}
-
-func TestInvalidCharacter(t *testing.T) {
-	for index, row := range invalidCharacterTests {
-		encoder := GSM7(row.Packed).NewEncoder()
-		_, _, err := transform.Bytes(encoder, []byte(row.Text))
-		if err == nil {
-			t.Fatalf("%2d: expected error but got no error", index)
-		}
-		if err != ErrInvalidCharacter {
-			t.Fatalf("%2d: expected '%s' but got '%s'", index, ErrInvalidCharacter, err.Error())
-		}
-	}
-}
-
-func TestInvalidByte(t *testing.T) {
-	for index, row := range invalidByteTests {
-		decoder := GSM7(row.Packed).NewDecoder()
-		_, _, err := transform.Bytes(decoder, row.Buff)
-		if err == nil {
-			t.Fatalf("%2d: expected error but got no error", index)
-		}
-		if err != ErrInvalidByte {
-			t.Fatalf("%2d: expected '%s' but got '%s'", index, ErrInvalidByte, err.Error())
-		}
-	}
-}
-
-func TestGSM7TransformerConsumedBytes(t *testing.T) {
-	for _, packed := range []bool{false, true} {
-		dst := make([]byte, 100)
-		_, n, err := GSM7(packed).NewEncoder().Transform(dst, []byte("é€"), true)
-		if err != nil || n != len("é€") {
-			t.Errorf("packed=%t encoder nSrc=%d want=%d err=%v", packed, n, len("é€"), err)
-		}
-		_, n, err = GSM7(packed).NewDecoder().Transform(dst, []byte{0x41}, true)
-		if err != nil || n != 1 {
-			t.Errorf("packed=%t decoder nSrc=%d want=1 err=%v", packed, n, err)
-		}
-	}
-	got, err := io.ReadAll(GSM7(false).NewDecoder().Reader(strings.NewReader("ABC")))
-	if err != nil || string(got) != "ABC" {
-		t.Errorf("Reader=%q err=%v", got, err)
-	}
-}
-
-func TestGSM7TransformerIncompleteInput(t *testing.T) {
-	for _, packed := range []bool{false, true} {
-		encoder := GSM7(packed).NewEncoder()
-		_, n, err := encoder.Transform(make([]byte, 10), []byte{0xc3}, false)
-		if n != 0 || !errors.Is(err, transform.ErrShortSrc) {
-			t.Errorf("packed=%t incomplete UTF8 nSrc=%d err=%v", packed, n, err)
-		}
-	}
-	_, n, err := GSM7(false).NewDecoder().Transform(make([]byte, 10), []byte{0x1b}, false)
-	if n != 0 || !errors.Is(err, transform.ErrShortSrc) {
-		t.Errorf("incomplete escape nSrc=%d err=%v", n, err)
-	}
-}
-
-func TestGSM7TransformerShortDestination(t *testing.T) {
-	for _, packed := range []bool{false, true} {
-		encoder := GSM7(packed).NewEncoder()
-		dst := make([]byte, 1)
-		nDst, nSrc, err := encoder.Transform(dst, []byte("ABC€"), true)
-		if !errors.Is(err, transform.ErrShortDst) || nDst != 1 || nSrc == 0 {
-			t.Errorf("packed=%t short dst nDst=%d nSrc=%d err=%v", packed, nDst, nSrc, err)
-		}
-		decoder := GSM7(packed).NewDecoder()
-		encoded, err := GSM7(packed).NewEncoder().Bytes([]byte("ABC€"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		nDst, nSrc, err = decoder.Transform(dst, encoded, true)
-		if !errors.Is(err, transform.ErrShortDst) || nDst != 1 || nSrc == 0 {
-			t.Errorf("packed=%t decoder short dst nDst=%d nSrc=%d err=%v", packed, nDst, nSrc, err)
-		}
-	}
-}
-
-type singleByteReader struct{ src []byte }
-
-func (r *singleByteReader) Read(dst []byte) (int, error) {
-	if len(r.src) == 0 {
-		return 0, io.EOF
-	}
-	dst[0] = r.src[0]
-	r.src = r.src[1:]
-	return 1, nil
-}
-
-func TestGSM7TransformerStreamingChunks(t *testing.T) {
-	text := strings.Repeat("é€ABC{", 1000)
-	for _, packed := range []bool{false, true} {
-		encoded, err := io.ReadAll(transform.NewReader(&singleByteReader{src: []byte(text)}, GSM7(packed).NewEncoder()))
-		if err != nil {
-			t.Fatalf("packed=%t encoder: %v", packed, err)
-		}
-		expected, err := GSM7(packed).NewEncoder().Bytes([]byte(text))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(encoded, expected) {
-			t.Fatalf("packed=%t streaming encoded differs", packed)
-		}
-		decoded, err := io.ReadAll(GSM7(packed).NewDecoder().Reader(&singleByteReader{src: encoded}))
-		if err != nil || string(decoded) != text {
-			t.Fatalf("packed=%t decoded len=%d want=%d err=%v", packed, len(decoded), len(text), err)
+	}{{GSM7BIT, unpackedTests}, {GSM7BITPACKED, packedTests}} {
+		for _, row := range fixture.rows {
+			encoded, err := fixture.codec.Encode(row.Text)
+			if err != nil || !bytes.Equal(encoded, row.Buff) {
+				t.Fatalf("%T encode %q=%x,%v want %x", fixture.codec, row.Text, encoded, err, row.Buff)
+			}
+			decoded, err := fixture.codec.Decode(row.Buff)
+			if err != nil || decoded != row.Text {
+				t.Fatalf("%T decode %x=%q,%v want %q", fixture.codec, row.Buff, decoded, err, row.Text)
+			}
 		}
 	}
 }
@@ -307,9 +82,6 @@ func FuzzGSM7RoundTrip(f *testing.F) {
 		}
 		septets, err := GSM7BIT.Encode(text)
 		if err != nil {
-			if len(ValidateGSM7String(text)) == 0 {
-				t.Fatalf("valid alphabet rejected: %v", err)
-			}
 			return
 		}
 		decoded, err := GSM7BIT.Decode(septets)
@@ -330,8 +102,11 @@ func FuzzGSM7RoundTrip(f *testing.F) {
 				// wire bytes as one CR with the mandatory duplicated padding.
 				expectedText = text[:len(text)-1]
 			}
-			encoding := GSM7(packed)
-			encoded, err := encoding.NewEncoder().Bytes([]byte(text))
+			encoding := GSM7BIT
+			if packed {
+				encoding = GSM7BITPACKED
+			}
+			encoded, err := encoding.Encode(text)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -345,17 +120,9 @@ func FuzzGSM7RoundTrip(f *testing.F) {
 					t.Fatalf("inferred packed round trip: %q != %q, err=%v", inferred, expectedText, err)
 				}
 			}
-			whole, err := encoding.NewDecoder().Bytes(encoded)
+			whole, err := encoding.Decode(encoded)
 			if err != nil || string(whole) != expectedText {
 				t.Fatalf("packed=%t whole text=%q want=%q err=%v", packed, whole, expectedText, err)
-			}
-			streaming, err := io.ReadAll(transform.NewReader(&singleByteReader{src: []byte(text)}, encoding.NewEncoder()))
-			if err != nil || !bytes.Equal(streaming, encoded) {
-				t.Fatalf("packed=%t streaming encode mismatch, err=%v", packed, err)
-			}
-			actual, err := io.ReadAll(encoding.NewDecoder().Reader(&singleByteReader{src: encoded}))
-			if err != nil || string(actual) != expectedText {
-				t.Fatalf("packed=%t streaming text=%q want=%q err=%v", packed, actual, expectedText, err)
 			}
 		}
 	})
@@ -363,7 +130,14 @@ func FuzzGSM7RoundTrip(f *testing.F) {
 
 func TestGSM7PackedPaddingRoundTrip(t *testing.T) {
 	for _, count := range []int{7, 15, 23} {
-		for r, septet := range forwardLookup {
+		for septet := byte(0); septet < 0x80; septet++ {
+			if septet == escapeSequence {
+				continue
+			}
+			r, err := GSM7BIT.Decode([]byte{septet})
+			if err != nil {
+				t.Fatal(err)
+			}
 			text := strings.Repeat("A", count-1) + string(r)
 			encoded, err := GSM7BITPACKED.Encode(text)
 			if err != nil {
@@ -407,9 +181,6 @@ func TestGSM7UndefinedExtensionFallback(t *testing.T) {
 		if err != nil || got != tc.want {
 			t.Errorf("raw=%x got=%q want=%q err=%v", tc.raw, got, tc.want, err)
 		}
-		if bad := ValidateGSM7Buffer(tc.raw); len(bad) != 0 {
-			t.Errorf("valid fallback %x rejected: %x", tc.raw, bad)
-		}
 		packed := referenceGSM7Pack(tc.raw, 0)
 		got, err = GSM7BITPACKED.Decode(packed)
 		if err != nil || got != tc.want {
@@ -447,7 +218,7 @@ func TestGSM7PackedDecodeFillAndCount(t *testing.T) {
 		count int
 	}{
 		{[]byte{0x41}, 7, 1}, {[]byte{0x41}, 0, -2}, {[]byte{0x41}, 0, 2},
-		{nil, 0, 1}, {[]byte{0x1b}, 0, 1},
+		{nil, 0, 1},
 	} {
 		_, err := DecodeGSM7Packed(tc.raw, tc.fill, tc.count)
 		if err == nil {

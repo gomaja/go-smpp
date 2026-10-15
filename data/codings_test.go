@@ -30,11 +30,14 @@ func testEncoding(t *testing.T, enc EncDec, original, expected string) {
 }
 
 func testEncodingSplit(t *testing.T, enc EncDec, octetLim uint, original string, expected []string, expectDecode []string) {
+	t.Helper()
 	splitter, ok := enc.(Splitter)
 	require.Truef(t, ok, "Encoding must implement Splitter interface")
 
 	segEncoded, err := splitter.EncodeSplit(original, octetLim)
 	require.Nil(t, err)
+	require.Len(t, segEncoded, len(expected), "encoded segment count")
+	require.Len(t, segEncoded, len(expectDecode), "decoded segment count")
 
 	for i, seg := range segEncoded {
 		require.Equal(t, fromHex(expected[i]), seg)
@@ -251,12 +254,8 @@ func TestSplit(t *testing.T) {
 		testEncodingSplit(t, LATIN1,
 			134,
 			"",
-			[]string{
-				"",
-			},
-			[]string{
-				"",
-			})
+			[]string{},
+			[]string{})
 	})
 
 	t.Run("testSplitLATIN1", func(t *testing.T) {
@@ -316,12 +315,8 @@ func TestSplit(t *testing.T) {
 		testEncodingSplit(t, GSM7BIT,
 			134,
 			"",
-			[]string{
-				"",
-			},
-			[]string{
-				"",
-			})
+			[]string{},
+			[]string{})
 	})
 
 	t.Run("testSplitUCS2", func(t *testing.T) {
@@ -342,12 +337,8 @@ func TestSplit(t *testing.T) {
 		testEncodingSplit(t, UCS2,
 			134,
 			"",
-			[]string{
-				"",
-			},
-			[]string{
-				"",
-			})
+			[]string{},
+			[]string{})
 	})
 
 	// UCS2 character should not be splitted in the middle
@@ -824,7 +815,7 @@ func TestFromDataCodingGSMAlphabetGroups(t *testing.T) {
 		{0x18, UCS2}, {0x48, UCS2}, {0x58, UCS2}, {0xe0, UCS2}, {0xe8, UCS2},
 		{0x20, BINARY8BIT2}, {0x28, BINARY8BIT2}, {0x60, BINARY8BIT2}, {0x68, BINARY8BIT2},
 		{0x14, BINARY8BIT2}, {0x44, BINARY8BIT2}, {0x54, BINARY8BIT2}, {0xf4, BINARY8BIT2},
-		{0xe4, GSM7BIT}, {0xec, GSM7BIT},
+		{0xe4, UCS2}, {0xec, UCS2}, {0xfc, BINARY8BIT2},
 		{0x1c, GSM7BIT}, {0x4c, GSM7BIT}, {0x80, GSM7BIT}, {0xf8, GSM7BIT},
 	} {
 		t.Run(fmt.Sprintf("%02x", tc.code), func(t *testing.T) {

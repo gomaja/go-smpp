@@ -1,5 +1,7 @@
 github.com/allegro/bigcache/v3 v3.2.0 h1:B45F9x3iaoBlhzIA+0jqxlThTUoyg+mOk7HUKSbJOL8=
 github.com/allegro/bigcache/v3 v3.2.0/go.mod h1:qvxNn6cSKfWRmfDuPJbZcfxsQXEtoskUqPzT0kuHG5s=
+github.com/gomaja/go-sms v0.0.0-20261015094524-012e434afe75 h1:4Ey35ndiM1fb4WsuWcP3SkQWY1tvtfr8MEVtTQ3IpJk=
+github.com/gomaja/go-sms v0.0.0-20261015094524-012e434afe75/go.mod h1:nmWk00DAPX0Jkg+l8TvEEPg5DqDgoheohi1ZasxN+N8=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=

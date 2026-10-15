@@ -691,19 +691,43 @@ replaces UDH concatenation metadata and drops stale SAR TLVs (TS 23.040
 final IE prevents parsing; its declared bytes are skipped before the payload.
 `data.CustomEncoding.BaseEncoding` exposes the underlying codec; `ShouldSplit`
 and `EncodeSplit` delegate to its splitter when available. GSM text uses
-escape-safe 160/153-septet budgets; UCS2 counts encoded UTF-16 octets, including
-surrogate pairs. UDH consumes each part's payload budget.
+escape-safe 160/153-septet budgets; `data.UCS2` counts encoded UTF-16 octets,
+including surrogate pairs, and `data.UCS2Strict` counts two octets per BMP
+character. UDH consumes each part's payload budget.
 
 ### data_coding
 
 `data.SMSCDefaultCoding` is `0x00`; `GSM7BITCoding` is its compatibility alias.
-The default alphabet and extension table follow TS 23.038 §§6.2.1–6.2.1.1.
-`FromDataCoding` classifies coding groups under TS 23.038 §4; reserved alphabets
-fall back to GSM. Defined compressed alphabets remain raw binary until TS 23.042
-support exists. SMPP 05/09/0A/0D/0E are opaque text alphabets (v3.4 §5.2.19)
-with 140-octet budgets: they remain unsplit when they fit, or fail without a
+The local default remains GSM7; a peer with another SMSC-default alphabet needs
+a custom codec. Default-alphabet and extension-table conversion uses
+`github.com/gomaja/go-sms/encoding/gsm7` (TS 23.038 §§6.2.1–6.2.1.1).
+`data.GSM7BIT.Decode` follows its permissive receiver policy: an unassigned
+extension falls back to the main table, a repeated or trailing ESC displays a
+space, and a byte above `0x7f` becomes a space. Encoding rejects malformed UTF-8
+and unrepresentable characters with the dependency's typed errors.
+
+`FromDataCoding` keeps the SMPP v3.4 §5.2.19 meanings for `0x00`–`0x0f`, including
+ASCII, Latin-1, binary and opaque alphabets. For all other bytes it uses
+`tpdu.DCS` from go-sms as a lenient TP-DCS extension under TS 23.038 §4, preserving
+the original `DataCoding()` byte. This is an interoperability policy: the SMPP
+table reserves some of these values. Reserved TP-DCS codings fall back to GSM;
+defined compressed alphabets remain raw binary until TS 23.042 support exists.
+Reserved bits do not change a defined TP-DCS alphabet: `0xe4`–`0xe7` and
+`0xec`–`0xef` select UCS2, while `0xfc`–`0xff` select binary.
+
+SMPP `0x05`, `0x09`, `0x0a`, `0x0d` and `0x0e` are opaque text alphabets with
+140-octet budgets: they remain unsplit when they fit, or fail without a
 character-aware codec. Custom codecs without a splitter accept at most 254
 octets including UDH; received 255-octet fields can still be forwarded.
+
+`data.UCS2` retains UTF-16BE interoperability, including supplementary characters
+as surrogate pairs; `data.UCS2Strict` encodes only BMP Unicode scalar values.
+Both send `data_coding=0x08` and reject malformed string UTF-8. They use go-sms's
+`ucs2.EncodeUTF16` and `ucs2.Encode` respectively, and share `ucs2.Decode` on
+receive (TS 23.038 §6.2.3; RFC 2781 §§2.1–2.2). Odd byte lengths return
+`ucs2.ErrInvalidLength`; a final high surrogate returns the decoded prefix and
+`ucs2.ErrDanglingSurrogate`. Other unpaired surrogates become U+FFFD. Neither
+decoder strips a BOM or changes the fixed big-endian byte order.
 
 ASCII encoding rejects unrepresentable characters. Latin-1 preserves C1
 controls. Cyrillic and Hebrew codecs replace C1 controls on decode and reject
@@ -719,6 +743,11 @@ terminal `@` and CR can be ambiguous. Supply a count to `data.DecodeGSM7Packed`
 when available. Raw packed text is split only when it round-trips
 byte-identically, with original text also required for ambiguous tails. See
 [packed GSM conventions](docs/spec-compliance.md#packed-gsm-padding).
+
+Alphabet conversion uses go-sms; the existing local packed-bit handling,
+padding inference and split behavior remain until
+[go-sms #19](https://github.com/gomaja/go-sms/issues/19) supplies aligned CR
+packing. This change does not switch packed decoding to `Unpack7BitUSSD`.
 
 ## Breaking changes on main
 
@@ -736,7 +765,13 @@ implementations as follows. The contracts above describe the resulting behavior.
 | `ShortMessage.SetUDH`, `DestinationAddresses.Add`, `ShortMessage.Marshal` and `DestinationAddresses.Marshal` return errors. | Check each result; construction and marshaling can fail. |
 | `pdu.PDU` requires six additional methods. | Custom implementations must add `AppendOptionalParam`, `ClearOptionalParameters`, `GetOptionalParam`, `GetOptionalParameters`, `GetOptionalParams` and `SetCommandStatus`. |
 | `data.SMPP_V33` changes from `-0x33` to `0x33`; `OPT_PAR_MSG_WAIT` from `0x0002` to `0x0030`; `OPT_PAR_QOS_TIME_TO_LIVE_MIN` from `1` to `4`. | Use the named constants and update literal comparisons or lengths to the corrected values. |
-| Reserved `data_coding` alphabets follow TS 23.038 §4, including compressed groups. | Use `FromDataCoding`; reserved alphabets fall back to GSM, while defined compressed alphabets remain binary. |
+| Outside `0x00`–`0x0f`, `FromDataCoding` delegates TP-DCS classification, including reserved bits, to go-sms. | Keep SMPP direct values separate from TP-DCS. `0xe4`–`0xe7` / `0xec`–`0xef` now select UCS2; `0xfc`–`0xff` now select binary. Reserved codings fall back to GSM and defined compressed alphabets remain binary. |
+| `data.GSM7(packed bool)` and its public x/text streaming adapter are removed. | Use `data.GSM7BIT` / `data.GSM7BITPACKED` for complete SMPP messages, or `gsm7.Encode` / `gsm7.Decode` for unpacked septets. Buffer complete messages instead of relying on the removed streaming transformer. x/text remains for the non-GSM codecs. |
+| `ValidateGSM7String`, `ValidateGSM7Buffer`, `GetEscapeChars` and `IsEscapeChar` are removed. | Encode with `gsm7.Encode` and inspect its typed error; derive septet costs from the encoded bytes. For stricter receive diagnostics use `gsm7.Strict`, which also rejects unassigned-extension fallback and is not equivalent to the old buffer validator. |
+| `GetSeptetCount` on the packed codec's concrete type is removed. | Use the length of `gsm7.Encode` output to count septets before packing; extension characters consume two. |
+| `data.ErrInvalidCharacter` and `data.ErrInvalidByte` are removed. | GSM encoding returns `gsm7.ErrUnencodable` or `gsm7.ErrInvalidUTF8`; inspect them with `errors.As`. Unpacked decoding now follows the permissive policy above. Invalid packed fill/count arguments return ordinary descriptive errors. |
+| `data.UCS2` uses go-sms's UTF-16 codec; `data.UCS2Strict` adds strict UCS2 encoding with the same wire value `0x08`. | Keep `UCS2` for supplementary-character interoperability or explicitly select `UCS2Strict`; handle `ucs2.ErrUnencodable` for supplementary characters in strict mode. |
+| Malformed string UTF-8 is rejected, and UCS2/UTF-16 odd lengths or final high surrogates return typed errors. | Check errors from setters and getters with `errors.Is` / `errors.As`; retain a decoded prefix returned with `ucs2.ErrDanglingSurrogate` for reassembly. Other unpaired surrogates still decode as U+FFFD. |
 
 ### Request stores and callbacks
 

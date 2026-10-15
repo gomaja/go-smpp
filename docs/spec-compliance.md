@@ -781,19 +781,28 @@ unpacked alphabets retain their conversion and need not implement `Splitter`
 for the legacy packed PDU path. PDU construction, decoding and splitting apply
 packing or unpacking exactly once. Legacy packed construction includes the
 replacement's configured NLI IEs on every segment (TS 23.040
-§§9.2.3.24.15–16). Explicitly configured packed codecs use their own alphabet
-when no NLI IEs are present; PDU decoding with a configured national-language
-codec uses the default receive tables when its NLI IEs are absent. Received NLI IEs take
-precedence over codec table options.
+§§9.2.3.24.15–16). Explicitly configured default-table packed codecs retain
+their default alphabet during PDU decoding. Standalone configured codec
+`Decode` uses its selected tables and has no UDH to interpret. PDU receive
+decoding instead selects tables from received NLI IEs; absent IEs select the
+corresponding default tables, including when the receive codec was configured
+with national-language tables. Received NLI IEs take precedence over codec
+table options.
 
 `FromDataCoding(0)` resolves the current `GSM7BIT`, rather than a saved initial
 codec. Assigning `GSM7BIT = GSM7BITPACKED` therefore makes data_coding 0 packed;
 a configured packed replacement does likewise. A custom replacement supplies
 its selected conversion. The returned codec preserves wire coding 0 even if
 the replacement advertises a different coding. Configure the variable before
-concurrent use: access is not synchronized. Nil encoding arguments on text
-constructors and raw setters resolve that default before selecting NLI IEs or
-segmentation budgets. These corrections are listed in
+concurrent use: access is not synchronized. `DefaultGSM7` is the effective
+default lookup: a nil `GSM7BIT` selects the built-in unpacked default codec.
+Coding lookup, encoding selection, text constructors and packed alphabet
+resolution all use that policy. Nil text encoding arguments resolve the
+effective default before selecting NLI IEs. Raw setters retain nil in
+`Encoding()` and marshal data_coding 0 regardless of the replacement's coding;
+codec operations and segmentation budgets resolve the effective default
+locally without changing that stored selection, including on split parts.
+These corrections are listed in
 the [behavior-change table](../README.md#pdus-and-encoding).
 
 Standalone packed codecs remain independent of that variable, and `NewGSM7`

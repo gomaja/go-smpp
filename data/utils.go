@@ -14,7 +14,7 @@ import (
 // has been replaced, that codec must also accept s; otherwise UCS2 is returned.
 func FindEncoding(s string) Encoding {
 	if _, err := gsm7.Encode([]byte(s)); err == nil {
-		candidate := GSM7BIT
+		candidate := DefaultGSM7()
 		if _, err := candidate.Encode(s); err == nil {
 			return candidate
 		}

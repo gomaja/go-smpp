@@ -532,10 +532,13 @@ func (c *ucs2) EncodeSplit(text string, octetLimit uint) (allSeg [][]byte, err e
 func (*ucs2) DataCoding() byte { return UCS2Coding }
 
 var (
+	defaultGSM7 = &gsm7bit{}
+
 	// GSM7BIT selects the SMSC-default codec, initially unpacked GSM7. A packed
-	// replacement makes FromDataCoding(0) packed. Legacy packed PDU paths
-	// borrow its alphabet with packing removed; configure before concurrent use.
-	GSM7BIT Encoding = &gsm7bit{}
+	// replacement makes FromDataCoding(0) packed. Nil selects the initial codec.
+	// Legacy packed PDU paths borrow its alphabet with packing removed;
+	// configure before concurrent use.
+	GSM7BIT Encoding = defaultGSM7
 
 	// GSM7BITPACKED is packed gsm-7bit encoding.
 	// Most of SMSC(s) use unpack version.
@@ -588,10 +591,11 @@ var codingMap = map[byte]Encoding{
 // Alphabet; this package maps it to the current GSM7BIT for compatibility.
 func FromDataCoding(code byte) (enc Encoding) {
 	if code == SMSCDefaultCoding {
-		if GSM7BIT.DataCoding() != code {
-			return NewCustomEncoding(code, GSM7BIT)
+		underlying := DefaultGSM7()
+		if underlying.DataCoding() != code {
+			return NewCustomEncoding(code, underlying)
 		}
-		return GSM7BIT
+		return underlying
 	}
 	if enc, ok := codingMap[code]; ok {
 		return enc
@@ -603,7 +607,7 @@ func FromDataCoding(code byte) (enc Encoding) {
 	case 0x05, 0x09, 0x0a, 0x0d, 0x0e:
 		return &opaque8bit{coding: code}
 	}
-	underlying := GSM7BIT
+	underlying := DefaultGSM7()
 	// Preserve SMPP's direct reserved values 0x0b, 0x0c and 0x0f exactly.
 	if code < 0x10 {
 		return NewCustomEncoding(code, underlying)

@@ -46,7 +46,7 @@ func gsm7Options(enc data.Encoding) (data.GSM7Options, bool) {
 		// The legacy packed path borrows the selected alphabet and NLI tables,
 		// but owns packing itself. Resolve once so self-replacement terminates.
 		opts := data.GSM7Options{Packed: true}
-		alphabet, err := data.UnpackedGSM7(data.GSM7BIT)
+		alphabet, err := data.UnpackedGSM7(data.DefaultGSM7())
 		if err == nil {
 			if configured, ok := alphabet.(interface{ GSM7Options() data.GSM7Options }); ok {
 				opts = configured.GSM7Options()
@@ -55,7 +55,7 @@ func gsm7Options(enc data.Encoding) (data.GSM7Options, bool) {
 		}
 		return opts, true
 	}
-	return data.GSM7Options{}, enc == nil || enc == data.GSM7BIT
+	return data.GSM7Options{}, enc == nil || enc == data.DefaultGSM7()
 }
 
 // Merge the explicit sender choice without changing caller-owned IE storage.
@@ -119,6 +119,9 @@ func decodeGSM7WithUDH(septets []byte, udh UDH) (string, error) {
 }
 
 func unpackedGSMCodec(enc data.Encoding) (data.Encoding, error) {
+	if enc == nil {
+		enc = data.DefaultGSM7()
+	}
 	if custom, ok := enc.(*data.CustomEncoding); ok {
 		if base, ok := custom.BaseEncoding().(data.Encoding); ok {
 			return unpackedGSMCodec(base)
@@ -127,7 +130,7 @@ func unpackedGSMCodec(enc data.Encoding) (data.Encoding, error) {
 	// Legacy PDU setters share their caller-selected alphabet with the public
 	// fill/count decoder. Standalone packed codecs remain independent of it.
 	if enc == data.GSM7BITPACKED {
-		return data.UnpackedGSM7(data.GSM7BIT)
+		return data.UnpackedGSM7(data.DefaultGSM7())
 	}
 	return data.UnpackedGSM7(enc)
 }

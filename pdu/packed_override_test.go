@@ -24,37 +24,43 @@ func TestPackedDefaultOverrideRoundTrip(t *testing.T) {
 		return enc
 	}
 	for _, tc := range []struct {
-		name     string
-		codec    data.Encoding
-		alphabet data.Encoding
-		unit     string
-		nli      bool
+		name            string
+		codec           data.Encoding
+		alphabet        data.Encoding
+		unit            string
+		locking, single int
+		packed          bool
 	}{
-		{"initial", initial, initial, "A£€@", false},
-		{"legacy", data.GSM7BITPACKED, initial, "A£€@", false},
-		{"configured", configured(data.GSM7Options{Packed: true}), initial, "A£€@", false},
-		{"locking", configured(data.GSM7Options{Packed: true, LockingShift: 1}), configured(data.GSM7Options{LockingShift: 1}), "Ğ€@", true},
-		{"single", configured(data.GSM7Options{Packed: true, SingleShift: 2}), configured(data.GSM7Options{SingleShift: 2}), "Á€@", true},
-		{"custom", data.NewCustomEncoding(0, unpackedAlphabet{data.ASCII}), data.ASCII, "A`@", false},
-		{"wrapped_packed", data.NewCustomEncoding(0, data.NewCustomEncoding(0, data.GSM7BITPACKED)), initial, "A£€@", false},
-		{"wrapped_tables", data.NewCustomEncoding(0, configured(data.GSM7Options{Packed: true, LockingShift: 1, SingleShift: 2})), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", true},
+		{"initial", initial, initial, "A£€@", 0, 0, false},
+		{"legacy", data.GSM7BITPACKED, initial, "A£€@", 0, 0, true},
+		{"configured", configured(data.GSM7Options{Packed: true}), initial, "A£€@", 0, 0, true},
+		{"locking", configured(data.GSM7Options{Packed: true, LockingShift: 1}), configured(data.GSM7Options{LockingShift: 1}), "Ğ€@", 1, 0, true},
+		{"single", configured(data.GSM7Options{Packed: true, SingleShift: 2}), configured(data.GSM7Options{SingleShift: 2}), "Á€@", 0, 2, true},
+		{"custom", data.NewCustomEncoding(0, unpackedAlphabet{data.ASCII}), data.ASCII, "A`@", 0, 0, false},
+		{"wrapped_packed", data.NewCustomEncoding(0, data.NewCustomEncoding(0, data.GSM7BITPACKED)), initial, "A£€@", 0, 0, true},
+		{"wrapped_tables", data.NewCustomEncoding(0, configured(data.GSM7Options{Packed: true, LockingShift: 1, SingleShift: 2})), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", 1, 2, true},
+		{"unpacked_locking", configured(data.GSM7Options{LockingShift: 1}), configured(data.GSM7Options{LockingShift: 1}), "Ğ€@", 1, 0, false},
+		{"unpacked_single", configured(data.GSM7Options{SingleShift: 2}), configured(data.GSM7Options{SingleShift: 2}), "Á€@", 0, 2, false},
+		{"unpacked_both", configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", 1, 2, false},
+		{"unpacked_wrapped", data.NewCustomEncoding(0, configured(data.GSM7Options{LockingShift: 1, SingleShift: 2})), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", 1, 2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			saved := data.GSM7BIT
 			t.Cleanup(func() { data.GSM7BIT = saved })
 			data.GSM7BIT = tc.codec
 			for _, sender := range []struct {
-				name                   string
-				codec                  data.Encoding
-				alphabet               data.Encoding
-				unit                   string
-				nli, packed, automatic bool
+				name              string
+				codec             data.Encoding
+				alphabet          data.Encoding
+				unit              string
+				locking, single   int
+				packed, automatic bool
 			}{
-				{"legacy", data.GSM7BITPACKED, tc.alphabet, tc.unit, tc.nli, true, tc.name != "initial" && tc.name != "custom"},
-				{"wrapped_legacy", data.NewCustomEncoding(0, data.GSM7BITPACKED), tc.alphabet, tc.unit, tc.nli, true, tc.name != "initial" && tc.name != "custom"},
-				{"explicit_plain", configured(data.GSM7Options{Packed: true}), initial, "Aè€@", false, true, false},
-				{"explicit_nli", configured(data.GSM7Options{Packed: true, LockingShift: 1, SingleShift: 2}), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", true, true, tc.name != "initial" && tc.name != "custom"},
-				{"unpacked_nli", configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", true, false, tc.name == "initial"},
+				{"legacy", data.GSM7BITPACKED, tc.alphabet, tc.unit, tc.locking, tc.single, true, tc.packed},
+				{"wrapped_legacy", data.NewCustomEncoding(0, data.GSM7BITPACKED), tc.alphabet, tc.unit, tc.locking, tc.single, true, tc.packed},
+				{"explicit_plain", configured(data.GSM7Options{Packed: true}), initial, "Aè€@", 0, 0, true, false},
+				{"explicit_nli", configured(data.GSM7Options{Packed: true, LockingShift: 1, SingleShift: 2}), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", 1, 2, true, tc.packed},
+				{"unpacked_nli", configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), configured(data.GSM7Options{LockingShift: 1, SingleShift: 2}), "ĞÁ€@", 1, 2, false, !tc.packed && tc.name != "custom"},
 			} {
 				for _, repeat := range []int{16, 100} {
 					for _, construction := range []string{"constructor", "setter", "short"} {
@@ -112,21 +118,14 @@ func TestPackedDefaultOverrideRoundTrip(t *testing.T) {
 								if err != nil || rawErr != nil || !bytes.Equal(raw, want) {
 									t.Fatalf("payload=%x,%v; want %x,%v", raw, rawErr, want, err)
 								}
-								hasNLI := false
-								for _, ie := range part.UDH() {
-									if ie.ID == 0x24 || ie.ID == 0x25 {
-										hasNLI = true
-									}
-								}
-								if hasNLI != sender.nli {
-									t.Fatalf("NLI=%v; want %v", hasNLI, sender.nli)
-								}
+								checkOverrideNLI(t, part, sender.locking, sender.single)
 								packet := pdu.NewSubmitSM().(*pdu.SubmitSM)
 								packet.Message = *part
 								if len(header) > 0 {
 									packet.EsmClass = data.SM_UDH_GSM
 								}
 								received := packedReviewReceived(t, packet)
+								checkOverrideNLI(t, received, sender.locking, sender.single)
 								got, err := received.GetMessageWithEncoding(sender.codec)
 								if err != nil || got != local {
 									t.Fatalf("parsed=%q,%v; want %q", got, err, local)
@@ -306,5 +305,216 @@ func TestPackedDefaultNilRawSplit(t *testing.T) {
 	}
 	if joined.String() != text {
 		t.Fatalf("raw default=%q; want %q", joined.String(), text)
+	}
+}
+
+func TestRawNilEncodingPreservesSelectionAndCoding(t *testing.T) {
+	initial := data.GSM7BIT
+	for _, tc := range []struct {
+		name string
+		enc  data.Encoding
+	}{
+		{"initial", initial}, {"ASCII", data.ASCII}, {"packed", data.GSM7BITPACKED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := data.GSM7BIT
+			t.Cleanup(func() { data.GSM7BIT = saved })
+			data.GSM7BIT = tc.enc
+			for _, constructor := range []bool{false, true} {
+				for _, count := range []int{1, 170} {
+					text := strings.Repeat("A", count)
+					raw, err := tc.enc.Encode(text)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var message pdu.ShortMessage
+					if constructor {
+						message, err = pdu.NewBinaryShortMessageWithEncoding(raw, nil)
+					} else {
+						err = message.SetMessageDataWithEncoding(raw, nil)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if message.Encoding() != nil {
+						t.Error("raw setter changed nil encoding")
+					}
+					got, err := message.GetMessage()
+					if err != nil || got != text {
+						t.Fatalf("raw text=%q,%v; want %q", got, err, text)
+					}
+					wire := pdu.NewBuffer(nil)
+					if err := message.Marshal(wire); err != nil {
+						t.Fatal(err)
+					}
+					want := append([]byte{0, 0, byte(len(raw))}, raw...)
+					if !bytes.Equal(wire.Bytes(), want) {
+						t.Errorf("raw wire=%x; want %x", wire.Bytes(), want)
+					}
+					packet := pdu.NewSubmitSM().(*pdu.SubmitSM)
+					packet.Message = message
+					parts, err := packet.Split()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if packet.Message.Encoding() != nil {
+						t.Error("splitting changed source nil encoding")
+					}
+					var joined strings.Builder
+					for _, part := range parts {
+						if part.Message.Encoding() != nil {
+							t.Error("split part changed nil encoding")
+						}
+						wire := pdu.NewBuffer(nil)
+						if err := part.Message.Marshal(wire); err != nil {
+							t.Fatal(err)
+						}
+						if wire.Bytes()[0] != 0 {
+							t.Errorf("split coding=%02x; want 00", wire.Bytes()[0])
+						}
+						got, err := packedReviewReceived(t, part).GetMessage()
+						if err != nil {
+							t.Fatal(err)
+						}
+						joined.WriteString(got)
+					}
+					if joined.String() != text {
+						t.Fatalf("split text=%q; want %q", joined.String(), text)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestNilGSM7DefaultConstructors(t *testing.T) {
+	saved := data.GSM7BIT
+	t.Cleanup(func() { data.GSM7BIT = saved })
+	data.GSM7BIT = nil
+	for _, count := range []int{8, 320} {
+		text := strings.Repeat("A", count)
+		for _, constructor := range []func(string) ([]*pdu.ShortMessage, error){
+			pdu.NewLongMessage,
+			func(s string) ([]*pdu.ShortMessage, error) { return pdu.NewLongMessageWithEncoding(s, nil) },
+			func(s string) ([]*pdu.ShortMessage, error) {
+				var m pdu.ShortMessage
+				if err := m.SetLongMessageWithEnc(s, nil); err != nil {
+					return nil, err
+				}
+				packet := pdu.NewSubmitSM().(*pdu.SubmitSM)
+				packet.Message = m
+				packets, err := packet.Split()
+				var parts []*pdu.ShortMessage
+				for _, part := range packets {
+					parts = append(parts, &part.Message)
+				}
+				return parts, err
+			},
+		} {
+			parts, err := constructor(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (count == 8 && len(parts) != 1) || (count == 320 && len(parts) < 2) {
+				t.Fatalf("parts=%d", len(parts))
+			}
+			var joined strings.Builder
+			for _, part := range parts {
+				packet := pdu.NewSubmitSM().(*pdu.SubmitSM)
+				packet.Message = *part
+				if len(part.UDH()) > 0 {
+					packet.EsmClass = data.SM_UDH_GSM
+				}
+				got, err := packedReviewReceived(t, packet).GetMessage()
+				if err != nil {
+					t.Fatal(err)
+				}
+				joined.WriteString(got)
+			}
+			if joined.String() != text {
+				t.Fatalf("nil default text=%q; want %q", joined.String(), text)
+			}
+		}
+	}
+	for _, constructor := range []func(string) (pdu.ShortMessage, error){
+		pdu.NewShortMessage,
+		func(s string) (pdu.ShortMessage, error) { return pdu.NewShortMessageWithEncoding(s, nil) },
+		func(s string) (pdu.ShortMessage, error) {
+			return pdu.NewShortMessageWithEncoding(s, data.GSM7BITPACKED)
+		},
+	} {
+		message, err := constructor("AAAAAAAA")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := message.GetMessage()
+		if err != nil || got != "AAAAAAAA" {
+			t.Fatalf("nil default short=%q,%v", got, err)
+		}
+	}
+	message, err := pdu.NewBinaryShortMessageWithEncoding([]byte{'A'}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := message.GetMessage()
+	if err != nil || got != "A" || message.Encoding() != nil {
+		t.Fatalf("nil raw default=%q,%v enc=%T", got, err, message.Encoding())
+	}
+}
+
+func checkOverrideNLI(t *testing.T, message *pdu.ShortMessage, locking, single int) {
+	t.Helper()
+	seen := map[byte]int{}
+	for _, ie := range message.UDH() {
+		var want int
+		switch ie.ID {
+		case 0x24:
+			want = single
+		case 0x25:
+			want = locking
+		default:
+			continue
+		}
+		if want == 0 || len(ie.Data) != 1 || int(ie.Data[0]) != want {
+			t.Errorf("NLI %02x=%x; want %d", ie.ID, ie.Data, want)
+		}
+		seen[ie.ID]++
+	}
+	for id, value := range map[byte]int{0x24: single, 0x25: locking} {
+		count := 0
+		if value != 0 {
+			count = 1
+		}
+		if seen[id] != count {
+			t.Errorf("NLI %02x count=%d; want %d with value %d", id, seen[id], count, value)
+		}
+	}
+}
+
+func TestRawNilEncodingPreservesReceivedNLI(t *testing.T) {
+	saved := data.GSM7BIT
+	t.Cleanup(func() { data.GSM7BIT = saved })
+	codec, err := data.NewGSM7(data.GSM7Options{LockingShift: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data.GSM7BIT = codec
+	message, err := pdu.NewBinaryShortMessageWithEncoding([]byte{4}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Raw bytes carry Portuguese locking selection, independently of the
+	// current Turkish default (TS 23.040 §9.2.3.24.16).
+	if err := message.SetUDH(pdu.UDH{{ID: 0x25, Data: []byte{3}}}); err != nil {
+		t.Fatal(err)
+	}
+	if message.Encoding() != nil {
+		t.Fatal("UDH setter changed nil encoding")
+	}
+	packet := pdu.NewSubmitSM().(*pdu.SubmitSM)
+	packet.Message = message
+	got, err := packedReviewReceived(t, packet).GetMessage()
+	if err != nil || got != "ê" {
+		t.Fatalf("received NLI=%q,%v; want ê", got, err)
 	}
 }

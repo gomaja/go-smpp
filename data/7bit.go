@@ -20,7 +20,7 @@ func DecodeGSM7Packed(src []byte, fillBits uint8, septetCount int) (string, erro
 	if err != nil || len(src) == 0 {
 		return "", err
 	}
-	codec, err := UnpackedGSM7(GSM7BIT)
+	codec, err := UnpackedGSM7(DefaultGSM7())
 	if err != nil {
 		return "", err
 	}

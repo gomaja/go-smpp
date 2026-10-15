@@ -894,6 +894,14 @@ reads and writes are not synchronized. Received NLI IEs select the tables for
 each segment. In PDU decoding, a configured national-language codec uses the
 default tables when no NLI IEs are received.
 
+`data.DefaultGSM7()` returns the effective default. If `data.GSM7BIT` is nil,
+it returns the built-in unpacked codec; coding lookup, encoding selection,
+default text construction and packed alphabet resolution use the same policy.
+Raw setters keep a nil encoding as nil and marshal data_coding 0, even if the
+default codec advertises another coding. Codec operations and segmentation
+budgets consult the effective default without changing the stored encoding
+or that of generated parts.
+
 Standalone `data.GSM7BITPACKED.Encode` / `Decode` use the fixed default GSM
 tables. Sending with `data.NewGSM7` keeps its explicitly selected tables.
 
@@ -945,8 +953,9 @@ implementations as follows. The contracts above describe the resulting behavior.
 | GSM7 text setters reject caller-supplied NLI IEs that conflict with the selected tables. | Select tables with `NewGSM7` and matching NLI IEs; rebuild the message when changing a previously selected table. |
 | GSM7 `ShortMessage.GetMessage` now honors received NLI IEs. | Decode each part using its own UDH; select packed representation explicitly for peers that use it. |
 | Replacing `GSM7BIT` with a packed codec no longer packs or unpacks twice in PDU construction, decoding or splitting. | The packed PDU path and `DecodeGSM7Packed` borrow only the replacement's alphabet, retaining configured tables with packing off. Custom unpacked alphabets still work. Standalone packed codecs retain their fixed default tables. |
+| A nil `GSM7BIT` consistently selects the built-in unpacked default codec. | `FromDataCoding(0)`, `FindEncoding`, default text constructors and packed paths use `data.DefaultGSM7()`; nil no longer causes a codec lookup or construction panic. Raw nil encodings still retain their public selection and wire coding 0. |
 | `FromDataCoding(0)` now uses the current `GSM7BIT` instead of the initial codec. | A packed replacement makes received data_coding 0 packed; a custom replacement supplies its alphabet. The received coding remains 0 even if the replacement advertises another value. Configure before concurrent use. |
-| Legacy packed PDU construction inherits the configured replacement's NLI tables; explicitly configured packed codecs keep their own alphabet during decoding and splitting. | Selected NLI IEs accompany every outgoing part. Received NLI IEs take precedence; a configured national-language codec without received NLI IEs uses the default tables (TS 23.038 §§6.2.1.2.4–5; TS 23.040 §§9.2.3.24.15–16). A custom unpacked alphabet need not implement `Splitter` when used by the legacy packed PDU path. Nil encoding arguments resolve the current default before table selection and segmentation budgeting. |
+| Legacy packed PDU construction inherits the configured replacement's NLI tables; explicitly configured packed codecs keep their own alphabet during decoding and splitting. | Selected NLI IEs accompany every outgoing part. Received NLI IEs take precedence; a configured national-language codec without received NLI IEs uses the default tables (TS 23.038 §§6.2.1.2.4–5; TS 23.040 §§9.2.3.24.15–16). A custom unpacked alphabet need not implement `Splitter` when used by the legacy packed PDU path. Nil text encoding arguments resolve the effective default before table selection. Raw nil encodings remain nil and marshal coding 0; segmentation consults the effective default without storing it. |
 | Multipart packed segmentation may end a segment on a zero septet, changing part counts and segment bytes. | Recalculate multipart estimates and wire expectations: 300 `@` with caller UDH `02 70 00` now splits into 150/150 septets rather than 149/149/2. Single-message encodings are unchanged; boundaries follow the CR receive rule (TS 23.038 §6.1.2.3.1). |
 | Splitting retains a caller-selected 16-bit concatenation reference width. | Account for the complete header size; generated references, counts and part numbers still replace the old values. |
 | `data.GSM7(packed bool)` and its public x/text streaming adapter are removed. | Use `data.GSM7BIT` / `data.GSM7BITPACKED` for complete SMPP messages, or `gsm7.Encode` / `gsm7.Decode` for unpacked septets. Buffer complete messages instead of relying on the removed streaming transformer. x/text remains for the non-GSM codecs. |

@@ -146,3 +146,32 @@ func TestUnpackedGSM7PreservesAlphabet(t *testing.T) {
 		t.Fatalf("custom alphabet changed: %T,%v", alphabet, err)
 	}
 }
+
+func TestNilGSM7DefaultLookup(t *testing.T) {
+	saved := data.GSM7BIT
+	t.Cleanup(func() { data.GSM7BIT = saved })
+	data.GSM7BIT = nil
+	for code := range 256 {
+		enc := data.FromDataCoding(byte(code))
+		if enc == nil || enc.DataCoding() != byte(code) {
+			t.Fatalf("coding %02x: %T", code, enc)
+		}
+	}
+	for _, enc := range []data.Encoding{data.FromDataCoding(0), data.FromDataCoding(0x10), data.FindEncoding("AAAAAAAA")} {
+		raw, err := enc.Encode("AAAAAAAA")
+		if err != nil || !bytes.Equal(raw, []byte("AAAAAAAA")) {
+			t.Fatalf("nil default Encode=%x,%v", raw, err)
+		}
+		got, err := enc.Decode(raw)
+		if err != nil || got != "AAAAAAAA" {
+			t.Fatalf("nil default Decode=%q,%v", got, err)
+		}
+	}
+	if data.FindEncoding("😀") != data.UCS2 {
+		t.Fatal("nil default selected GSM for unrepresentable text")
+	}
+	got, err := data.DecodeGSM7Packed([]byte{0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x83}, 0, 8)
+	if err != nil || got != "AAAAAAAA" {
+		t.Fatalf("nil packed helper=%q,%v", got, err)
+	}
+}

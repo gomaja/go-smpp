@@ -38,6 +38,16 @@ func NewGSM7(opts GSM7Options) (Encoding, error) {
 	}, nil
 }
 
+// DefaultGSM7 returns the current GSM7BIT codec, or the built-in unpacked
+// default codec when GSM7BIT is nil. It preserves the selected codec's packing
+// and tables. Configure GSM7BIT before concurrent use; access is not synchronized.
+func DefaultGSM7() Encoding {
+	if enc := GSM7BIT; enc != nil {
+		return enc
+	}
+	return defaultGSM7
+}
+
 // UnpackedGSM7 returns the alphabet codec without bit packing. CustomEncoding
 // wrappers are followed when their base is an Encoding. A configured codec
 // retains its tables; the legacy packed codec (or nil) selects the built-in
@@ -57,7 +67,7 @@ func UnpackedGSM7(enc Encoding) (Encoding, error) {
 	}
 	switch enc.(type) {
 	case nil, *gsm7bitPacked:
-		return &gsm7bit{}, nil
+		return defaultGSM7, nil
 	default:
 		return enc, nil
 	}

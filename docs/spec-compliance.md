@@ -767,11 +767,15 @@ versions in the baseline above. National-language single/locking shift tables
 are specified in §6.2.1.2 and Annex A.
 
 `data.FindEncoding` tries go-sms's `gsm7.Encode` with its default alphabet and
-default extension table (TS 23.038 §§6.2.1–6.2.1.1). Successful encoding selects
-`GSM7BIT`; otherwise it selects `UCS2`. Thus `£`, `é`, `Δ` and `€` select GSM7,
-while backtick, ESC, controls outside the alphabet, CJK and emoji select UCS2.
-Extension characters consume two septets. Empty text selects GSM7; invalid
-UTF-8 selects UCS2 but remains invalid input to its encoder. No national
+default extension table (TS 23.038 §§6.2.1–6.2.1.1). It selects `GSM7BIT` only
+if both that default-table check and the actual `GSM7BIT` codec accept the text;
+otherwise it selects `UCS2`. This also applies when the public `GSM7BIT`
+variable has been replaced: replacing it with `ASCII` makes `£` select UCS2,
+so the returned codec can encode and split it. With the initial codec, `£`,
+`é`, `Δ` and `€` select GSM7, while backtick, ESC, controls outside the alphabet,
+CJK and emoji select UCS2.
+Extension characters consume two septets. Empty text selects GSM7 when its
+codec accepts it; invalid UTF-8 selects UCS2 but remains invalid input to its encoder. No national
 language tables are considered: an `Encoding` alone cannot supply the required
 NLI IEs. This corrects the former ASCII test; 80 `£` characters now occupy one
 segment instead of two. See the [behavior-change table](../README.md#pdus-and-encoding).

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gomaja/go-smpp/data"
 	"github.com/gomaja/go-smpp/errors"
+	smsucs2 "github.com/gomaja/go-sms/encoding/ucs2"
 
 	"github.com/stretchr/testify/require"
 )
@@ -326,8 +327,8 @@ func TestShortMessage(t *testing.T) {
 
 		// try to get message string with other encoding
 		m, err = s.GetMessageWithEncoding(data.FromDataCoding(data.UCS2Coding))
-		require.Nil(t, err)
-		require.NotEqual(t, "abc", m)
+		require.ErrorIs(t, err, smsucs2.ErrInvalidLength)
+		require.Empty(t, m)
 
 		// get message string with custom encoding
 		m, err = s.GetMessageWithEncoding(customCoding)

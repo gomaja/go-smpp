@@ -18,6 +18,32 @@ from V19.0.0.
 | Unicode | Official ISO-8859 mapping tables | [8859-1.TXT](https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-1.TXT), [8859-5.TXT](https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-5.TXT), [8859-8.TXT](https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-8.TXT) |
 | ITU-T | Numbering and network identification | [E.164](https://www.itu.int/rec/T-REC-E.164), [E.212](https://www.itu.int/rec/T-REC-E.212) |
 
+The coding authorities were rechecked on **2026-10-15**. The current 3GPP
+portals still list TS 23.038 V20.0.0 and TS 23.040 V20.0.0, and the sources
+linked above were unchanged. The [23.038 correction
+register](https://portal.3gpp.org/ChangeRequests.aspx?q=1&specnumber=23.038) and
+[23.040 correction
+register](https://portal.3gpp.org/ChangeRequests.aspx?q=1&specnumber=23.040) showed
+no newer approved replacement affecting this coding work. Approved 23.038
+CR 0243 (CBS language indication, §5) and 23.040 CR 0169 revision 3
+(emergency-SMS routing) are incorporated in V20. Unapproved proposals are not
+applied as corrections. The SMPP v3.4 Issue 1.2 source was unchanged.
+
+UTF-8 validation follows RFC 3629 §3; UTF-16 conversion follows RFC 2781
+§§2.1–2.2 and the fixed UTF-16BE form in §3.3. The RFC Editor records for
+[RFC 3629](https://www.rfc-editor.org/rfc/rfc3629.json) and
+[RFC 2781](https://www.rfc-editor.org/rfc/rfc2781.json) agree with their
+Datatracker records ([3629](https://datatracker.ietf.org/doc/rfc3629/),
+[2781](https://datatracker.ietf.org/doc/rfc2781/)): RFC 3629 is an Internet
+Standard; RFC 2781 is Informational. Neither has an incoming update or
+obsoletion, including an updating or obsoleting draft in the filtered
+Datatracker relationships. The errata searches for
+[3629](https://errata.rfc-editor.org/search/?rfc_number=3629&presentation=records)
+and [2781](https://errata.rfc-editor.org/search/?rfc_number=2781&presentation=records)
+returned no matching records. These encoding RFCs have no current sponsoring
+working group; the active mailmaint documents concern email-address syntax,
+not replacement UTF transformations.
+
 No IETF RFC governs SMPP binary PDUs or bind/session behavior. The [RFC Editor
 index](https://www.rfc-editor.org/rfc-index.xml) and [Datatracker SMPP document
 query](https://datatracker.ietf.org/api/v1/doc/document/?name__contains=smpp&format=json)
@@ -642,8 +668,9 @@ receive examples enforce these bounds before indexing reassembly buffers.
 
 ### Splitting budgets
 
-GSM-alphabet custom encodings use escape-safe 160/153 septet budgets. UCS2 uses
-encoded UTF-16 octets.
+GSM-alphabet custom encodings use escape-safe 160/153 septet budgets. `data.UCS2`
+uses encoded UTF-16 octets, preserving surrogate pairs; `data.UCS2Strict` uses
+two octets per BMP scalar. The wire coding remains `0x08` for both.
 
 A caller-supplied custom codec without a splitter constructs at most 254 octets
 including UDH (SMPP v3.4 §§5.2.21–22); longer text returns an error. Parsed
@@ -663,6 +690,15 @@ both conventions and calculates septet capacity after UDH fill bits.
 
 The USSD CR-padding rule also doubles a terminal CR on an octet boundary (TS
 23.038 §6.1.2.3.1).
+
+The alphabet conversion delegates to go-sms, but local bit packing, padding
+inference and packed segmentation remain unchanged pending
+[go-sms #19](https://github.com/gomaja/go-sms/issues/19). Its current APIs expose
+UDH fill bits with SMS zero padding, or USSD CR padding without UDH fill bits;
+neither combines alignment and the chosen CR convention. Packed decoding does
+not switch to `Unpack7BitUSSD`, whose doubled-CR behavior differs. This is a
+temporary boundary for the existing implementation, not a change to SMS's
+normative zero-fill rule or a standards defect in those APIs.
 
 The inferred decoder follows the padding convention; `data.DecodeGSM7Packed`
 accepts an explicit count when available. Raw packed messages are resegmented
@@ -684,6 +720,23 @@ The default alphabet and extension table use TS 23.038 §§6.2.1–6.2.1.1 and t
 versions in the baseline above. National-language single/locking shift tables
 are specified in §6.2.1.2 and Annex A.
 
+Default-alphabet conversion uses `github.com/gomaja/go-sms/encoding/gsm7`.
+Unpacked receive follows its permissive policy: an unassigned extension uses
+the main table, ESC followed by ESC or end-of-input displays a space, and bytes
+above `0x7f` become spaces. Encoding returns `gsm7.ErrUnencodable` for a
+character outside the alphabet and `gsm7.ErrInvalidUTF8` for malformed UTF-8,
+with byte offsets. Errors retain their types for `errors.As`.
+
+The public `data.GSM7` x/text factory, its streaming transformers,
+`ValidateGSM7String`, `ValidateGSM7Buffer`, `GetEscapeChars`, `IsEscapeChar`,
+`ErrInvalidCharacter`, `ErrInvalidByte` and the packed concrete type's
+`GetSeptetCount` method are removed. Use the complete-message `Encoding` codecs
+or go-sms's unpacked byte APIs; measure septet costs from the encoded output.
+`gsm7.Strict` is available for diagnostics but also rejects unassigned-extension
+fallback, so it is not a replacement for the previous buffer validator. Invalid
+`DecodeGSM7Packed` fill/count arguments return ordinary descriptive errors.
+See the [migration table](../README.md#pdus-and-encoding).
+
 ### ISO-8859
 
 Latin-1, Cyrillic and Hebrew use the Unicode Consortium's official ISO-8859
@@ -692,24 +745,60 @@ a dedicated test signals upstream behavior changes. Undefined Hebrew octets use
 x/text's replacement-character decoding. The Cyrillic/Hebrew C1 limitation and
 related issue are recorded under [Known limitations](#known-limitations).
 
-### UCS2 and ASCII
+### UCS2, UTF-16 and ASCII
 
-UCS2 uses encoded UTF-16 octets for splitting, preserving surrogate pairs.
-`data.ASCII` rejects unrepresentable text.
+`data.UCS2` retains its existing UTF-16BE repertoire through go-sms's
+`ucs2.EncodeUTF16`, including supplementary characters as surrogate pairs
+(RFC 2781 §2.1). `data.UCS2Strict` uses `ucs2.Encode`: only BMP Unicode scalar
+values can be represented with the 16 bits per character of TS 23.038 §6.2.3.
+Both advertise SMPP `data_coding=0x08` (§5.2.19); that byte cannot distinguish
+strict UCS2 from the UTF-16 interoperability extension. Both reject malformed
+UTF-8 before converting strings to runes (RFC 3629 §3), and preserve typed
+go-sms errors. Strict encoding returns `ucs2.ErrUnencodable` for a supplementary
+character.
+
+Both decode with `ucs2.Decode`, which accepts UTF-16 surrogate pairs. An odd
+byte length returns `ucs2.ErrInvalidLength` without decoded text. A final high
+surrogate returns the preceding decoded text and `ucs2.ErrDanglingSurrogate`,
+whose bytes may be completed by a later segment. Other unpaired surrogates
+become U+FFFD individually. RFC 2781 §2.2 leaves malformed-input recovery
+unspecified; the previous x/text replacement behavior is not reproduced for
+odd lengths or a final high surrogate. The fixed big-endian path does not
+strip a BOM or switch byte order (RFC 2781 §3.3).
+
+`data.ASCII` rejects unrepresentable text. ASCII, ISO-8859 and the explicit
+UTF-16 BOM/endian helpers retain their existing implementations; x/text remains
+a dependency for these non-GSM codecs.
 
 ### data_coding classification
 
-Compressed data-coding groups with a defined alphabet require TS 23.042 support
-and are retained as raw binary rather than encoded as uncompressed text.
-Reserved alphabet selections use the GSM default fallback from TS 23.038 §4,
-including when the compression bit is set. SMPP data_coding 05/09/0A/0D/0E are
-distinct opaque text alphabets (§5.2.19), with 140-octet budgets; without a
+`FromDataCoding` preserves the SMPP v3.4 §5.2.19 mapping for `0x00`–`0x0f`.
+SMPP and TP-DCS use different namespaces: SMPP `0x03` is Latin-1, for example,
+while TP-DCS `0x03` selects GSM7. SMPP values `0x05`, `0x09`, `0x0a`, `0x0d`
+and `0x0e` remain distinct opaque alphabets with 140-octet budgets; without a
 character-aware codec they remain unsplit if they fit and otherwise return an
-error.
+error. The reserved direct values `0x0b`, `0x0c` and `0x0f` retain the existing
+GSM fallback.
 
-Coding groups use TS 23.038 §4, with the V19/V20 relationship recorded in the
-baseline. `SMSCDefaultCoding` (`0x00`) names the SMSC default; `GSM7BITCoding`
-is its compatibility alias.
+For every other byte, classification delegates to go-sms's `tpdu.DCS.Alphabet`
+and `Compressed` under TS 23.038 §4. This lenient TP-DCS extension is retained
+for interoperability; it is not the SMPP table's assignment of values that it
+marks reserved, such as `0x10`–`0xbf` and `0xe0`–`0xef`. The original wire byte
+is always returned by `DataCoding()`.
+
+Defined compressed alphabets require TS 23.042 support and remain raw binary
+rather than being encoded as uncompressed text. Reserved TP-DCS codings use
+the GSM default fallback, including reserved alphabet selections with the
+compression bit set. Reserved bits within a defined group do not change its
+alphabet: `0xe4`–`0xe7` and `0xec`–`0xef` now select UCS2, and `0xfc`–`0xff`
+select binary, where the previous classifier selected GSM7. The wire bytes
+are unchanged; only the selected codec changes. There is no separate profile
+API for this extension.
+
+Coding groups use the V19/V20 relationship recorded in the baseline.
+`SMSCDefaultCoding` (`0x00`) names the SMSC default; `GSM7BITCoding` is its
+compatibility alias. The local default remains GSM7; callers need a custom
+codec for peers whose SMSC default is another alphabet.
 
 ## Hardening inputs
 

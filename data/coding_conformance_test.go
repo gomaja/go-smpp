@@ -3,11 +3,16 @@ package data
 import (
 	"bufio"
 	"bytes"
+	"errors"
+
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gomaja/go-sms/encoding/gsm7"
+	smsucs2 "github.com/gomaja/go-sms/encoding/ucs2"
 )
 
 // SMPP v3.4 Issue 1.2 §5.2.19 gives the direct alphabet assignments.
@@ -29,8 +34,8 @@ func TestFromDataCodingAllOctets(t *testing.T) {
 		"GGGGGGGGGGGGGGGG",
 		"GGGGGGGGGGGGGGGG",
 		"GGGGGGGGGGGGGGGG",
-		"UUUUGGGGUUUUGGGG",
-		"GGGGBBBBGGGGGGGG",
+		"UUUUUUUUUUUUUUUU",
+		"GGGGBBBBGGGGBBBB",
 	}
 	bases := map[byte]Encoding{'G': GSM7BIT, 'S': ASCII, 'B': BINARY8BIT2,
 		'L': LATIN1, 'C': CYRILLIC, 'H': HEBREW, 'U': UCS2}
@@ -229,25 +234,30 @@ func TestGSM7CurrentETSIAlphabetAndExtensions(t *testing.T) {
 	}
 	for value := 0x80; value <= 0xff; value++ {
 		for _, input := range [][]byte{{byte(value)}, {0x1b, byte(value)}} {
-			if _, err := GSM7BIT.Decode(input); err != ErrInvalidByte {
-				t.Errorf("out-of-range %X error = %v", input, err)
+			if text, err := GSM7BIT.Decode(input); err != nil || text != " " {
+				t.Errorf("out-of-range %X text=%q error = %v", input, text, err)
 			}
 		}
 	}
 	for _, text := range []string{"\x1b", "\u00a0", "ç", "😀", string([]byte{0xff})} {
-		if encoded, err := GSM7BIT.Encode(text); err != ErrInvalidCharacter {
-			t.Errorf("unsupported %q = %X, %v", text, encoded, err)
+		if encoded, err := GSM7BIT.Encode(text); err == nil {
+			t.Errorf("unsupported %q = %X without error", text, encoded)
+		} else {
+			var invalid gsm7.ErrInvalidUTF8
+			var unencodable gsm7.ErrUnencodable
+			if !errors.As(err, &invalid) && !errors.As(err, &unencodable) {
+				t.Errorf("unsupported %q unexpected error %T: %v", text, err, err)
+			}
 		}
 	}
-	if _, err := GSM7BIT.Decode([]byte{0x1b}); err != ErrInvalidByte {
-		t.Errorf("truncated escape error = %v", err)
+	if text, err := GSM7BIT.Decode([]byte{0x1b}); err != nil || text != " " {
+		t.Errorf("truncated escape text=%q error = %v", text, err)
 	}
 }
 
 // SMPP §5.2.19 calls coding 08 UCS2. The existing API deliberately uses
-// UTF-16BE compatibility, including supplementary pairs; Unicode 18.0 §§3.9–3.10
-// defines the pairs and replacement handling for malformed code units.
-// https://www.unicode.org/versions/Unicode18.0.0/core-spec/chapter-3/
+// UTF-16BE compatibility, including supplementary pairs (RFC 2781 §2.1).
+// Malformed input follows go-sms, including typed errors and decoded prefixes.
 func TestUCS2UTF16BECompatibility(t *testing.T) {
 	for _, tc := range []struct {
 		name, text string
@@ -272,30 +282,31 @@ func TestUCS2UTF16BECompatibility(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct {
-		name string
-		wire []byte
-		want string
+		name    string
+		wire    []byte
+		want    string
+		errKind string
 	}{
-		{"odd_octet", []byte{0}, "\ufffd"},
-		{"odd_after_character", []byte{0, 0x41, 0}, "A\ufffd"},
-		{"high_surrogate", []byte{0xd8, 0x3d}, "\ufffd"},
-		{"low_surrogate", []byte{0xde, 0}, "\ufffd"},
-		{"reversed_pair", []byte{0xde, 0, 0xd8, 0x3d}, "\ufffd\ufffd"},
-		{"high_then_BMP", []byte{0xd8, 0x3d, 0, 0x41}, "\ufffdA"},
-		{"high_then_high", []byte{0xd8, 0x3d, 0xd8, 0x3d}, "\ufffd\ufffd"},
-		{"truncated_low_surrogate", []byte{0xd8, 0x3d, 0xde}, "\ufffd\ufffd"},
+		{"odd_octet", []byte{0}, "", "odd"},
+		{"odd_after_character", []byte{0, 0x41, 0}, "", "odd"},
+		{"high_surrogate", []byte{0xd8, 0x3d}, "", "dangling"},
+		{"low_surrogate", []byte{0xde, 0}, "\ufffd", ""},
+		{"reversed_pair", []byte{0xde, 0, 0xd8, 0x3d}, "\ufffd", "dangling"},
+		{"high_then_BMP", []byte{0xd8, 0x3d, 0, 0x41}, "\ufffdA", ""},
+		{"high_then_high", []byte{0xd8, 0x3d, 0xd8, 0x3d}, "\ufffd", "dangling"},
+		{"truncated_low_surrogate", []byte{0xd8, 0x3d, 0xde}, "", "odd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decoded, err := UCS2.Decode(tc.wire)
-			if err != nil || decoded != tc.want {
-				t.Errorf("Decode(%X) = %q, %v; want %q", tc.wire, decoded, err, tc.want)
+			var dangling smsucs2.ErrDanglingSurrogate
+			if decoded != tc.want || tc.errKind == "odd" && !errors.Is(err, smsucs2.ErrInvalidLength) ||
+				tc.errKind == "dangling" && !errors.As(err, &dangling) || tc.errKind == "" && err != nil {
+				t.Errorf("Decode(%X)=%q,%v; want %q error=%s", tc.wire, decoded, err, tc.want, tc.errKind)
 			}
 		})
 	}
-	// An invalid UTF-8 source is replaced by the dependency's encoder.
-	encoded, err := UCS2.Encode(string([]byte{0xff}))
-	if err != nil || !bytes.Equal(encoded, []byte{0xff, 0xfd}) {
-		t.Errorf("invalid UTF-8 = %X, %v; want FFFD", encoded, err)
+	if encoded, err := UCS2.Encode(string([]byte{0xff})); err == nil || encoded != nil {
+		t.Errorf("invalid UTF-8=%X,%v; want rejection", encoded, err)
 	}
 }
 

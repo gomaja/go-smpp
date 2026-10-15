@@ -2,12 +2,15 @@ package data
 
 import (
 	"fmt"
-	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
+
+	"github.com/gomaja/go-sms/encoding/gsm7"
+	"github.com/gomaja/go-sms/encoding/tpdu"
+	smsucs2 "github.com/gomaja/go-sms/encoding/ucs2"
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
-	"golang.org/x/text/encoding/unicode"
 )
 
 const (
@@ -99,7 +102,7 @@ func (c *CustomEncoding) ShouldSplit(text string, octetLimit uint) bool {
 		return splitter.ShouldSplit(text, octetLimit)
 	}
 	encoded, err := c.Encode(text)
-	return err != nil || uint(len(encoded)) > octetLimit
+	return err == nil && uint(len(encoded)) > octetLimit
 }
 
 // EncodeSplit delegates text segmentation to the underlying encoding.
@@ -111,206 +114,119 @@ func (c *CustomEncoding) EncodeSplit(text string, octetLimit uint) ([][]byte, er
 	return nil, ErrNotImplSplitterInterface
 }
 
-type gsm7bit struct {
-	packed bool
+// Alphabet conversion is owned by go-sms (TS 23.038 §§6.2.1–6.2.1.1).
+type gsm7bit struct{}
+
+func (*gsm7bit) Encode(text string) ([]byte, error) {
+	return encodeGSM7(text)
 }
 
-func (c *gsm7bit) Encode(str string) ([]byte, error) {
-	return encode(str, GSM7(c.packed).NewEncoder())
+func (*gsm7bit) Decode(src []byte) (string, error) {
+	return decodeGSM7(src)
 }
 
-func (c *gsm7bit) Decode(data []byte) (string, error) {
-	return decode(data, GSM7(c.packed).NewDecoder())
-}
-
-func (c *gsm7bit) DataCoding() byte { return GSM7BITCoding }
-
-// getSeptetCount returns the number of septets the given runes occupy once
-// encoded. Escape characters (^ { } \ [ ~ ] | €) are not in the 3GPP TS 23.038
-// section 6.2.1 default alphabet and are transmitted as two-septet escape
-// sequences through the section 6.2.1.1 extension table.
-func (c *gsm7bit) getSeptetCount(runeSlice []rune) int {
-	escCharsLen := len(GetEscapeChars(runeSlice))
-	return len(runeSlice) - escCharsLen + escCharsLen*2
-}
-
-func (c *gsm7bit) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
-	// Count septets rather than bytes: a rune is not one septet (escape
-	// characters cost two) and is not one byte either (they are multi-byte
-	// in UTF-8), so len(text) measures neither budget correctly.
-	nSeptet := c.getSeptetCount([]rune(text))
-	if c.packed {
-		return uint(packedGSM7Octets(nSeptet, 0, strings.HasSuffix(text, "\r"))) > octetLimit
+func encodeGSM7(text string) ([]byte, error) {
+	encoded, err := gsm7.Encode([]byte(text))
+	if err == nil && encoded == nil {
+		encoded = []byte{}
 	}
-	return uint(nSeptet) > octetLimit
+	return encoded, err
 }
 
-func (c *gsm7bit) EncodeSplit(text string, octetLimit uint) (allSeg [][]byte, err error) {
+func decodeGSM7(src []byte) (string, error) {
+	text, err := gsm7.Decode(src)
+	return string(text), err
+}
+
+func (*gsm7bit) DataCoding() byte { return GSM7BITCoding }
+
+func (c *gsm7bit) ShouldSplit(text string, octetLimit uint) bool {
+	septets, err := c.Encode(text)
+	return err == nil && uint(len(septets)) > octetLimit
+}
+
+func (c *gsm7bit) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
 	if octetLimit == 0 {
 		return nil, fmt.Errorf("split limit must be positive")
 	}
-
-	allSeg = [][]byte{}
-	runeSlice := []rune(text)
-
-	// In the unpacked form every septet is carried in its own octet, so the
-	// septet budget per segment equals the octet limit.
-	lim := int(min(octetLimit, uint(len(runeSlice)*2)))
-
-	fr := 0
-	for fr < len(runeSlice) {
-		to := min(fr+lim, len(runeSlice))
-
-		// Walk by septet cost so escape characters are billed as two, and so
-		// an escape sequence is never split across segments (3GPP TS 23.040
-		// 9.2.3.24.1: "A character represented by an escape-sequence shall not
-		// be split in the middle.").
-		to = determineTo(fr, to, lim, runeSlice)
-		if to == fr {
+	septets, err := c.Encode(text)
+	if err != nil {
+		return nil, err
+	}
+	parts := [][]byte{}
+	for start := 0; start < len(septets); {
+		end := start + int(min(octetLimit, uint(len(septets)-start)))
+		// TS 23.040 §9.2.3.24.1: keep an escape and its character together.
+		if septets[end-1] == escapeSequence {
+			end--
+		}
+		if end == start {
 			return nil, fmt.Errorf("split limit cannot fit a GSM character")
 		}
-
-		seg, err := c.Encode(string(runeSlice[fr:to]))
-		if err != nil {
-			return nil, err
-		}
-		allSeg = append(allSeg, seg)
-		fr = to
+		parts = append(parts, septets[start:end:end])
+		start = end
 	}
-
-	return
+	return parts, nil
 }
 
-type gsm7bitPacked struct {
+type gsm7bitPacked struct{}
+
+func (*gsm7bitPacked) Encode(text string) ([]byte, error) {
+	septets, err := encodeGSM7(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(septets) == 0 {
+		return []byte{}, nil
+	}
+	return packGSM7WithFill(septets, 0), nil
 }
 
-func (c *gsm7bitPacked) Encode(str string) ([]byte, error) {
-	return encode(str, GSM7(true).NewEncoder())
+func (*gsm7bitPacked) Decode(src []byte) (string, error) {
+	return decodeGSM7Packed(src, 0, -1, true)
 }
 
-func (c *gsm7bitPacked) Decode(data []byte) (string, error) {
-	return decode(data, GSM7(true).NewDecoder())
+func (*gsm7bitPacked) DataCoding() byte { return GSM7BITCoding }
+
+func (c *gsm7bitPacked) ShouldSplit(text string, octetLimit uint) bool {
+	encoded, err := c.Encode(text)
+	return err == nil && uint(len(encoded)) > octetLimit
 }
 
-func (c *gsm7bitPacked) DataCoding() byte { return GSM7BITCoding }
-
-func (c *gsm7bitPacked) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
-	runeSlice := []rune(text)
-	tLen := len(runeSlice)
-	escCharsLen := len(GetEscapeChars(runeSlice))
-	regCharsLen := tLen - escCharsLen
-	// Escape characters occupy two septets; ETSI TS 23.038 V19.0.0
-	// §6.2.1.1, unchanged in 3GPP V20.0.0 (2026-06).
-	return uint(packedGSM7Octets(regCharsLen+escCharsLen*2, 0, strings.HasSuffix(text, "\r"))) > octetLimit
-}
-
-func (c *gsm7bitPacked) GetSeptetCount(runeSlice []rune) int {
-	tLen := len(runeSlice)
-	escCharsLen := len(GetEscapeChars(runeSlice))
-	regCharsLen := tLen - escCharsLen
-	return escCharsLen*2 + regCharsLen
-}
-
-func (c *gsm7bitPacked) EncodeSplit(text string, octetLimit uint) (allSeg [][]byte, err error) {
+func (*gsm7bitPacked) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
 	if octetLimit == 0 {
 		return nil, fmt.Errorf("split limit must be positive")
 	}
-
-	allSeg = [][]byte{}
-	runeSlice := []rune(text)
+	septets, err := encodeGSM7(text)
+	if err != nil {
+		return nil, err
+	}
+	parts := [][]byte{}
 	// One fill bit follows a six-octet UDH (TS 23.040 §9.2.3.24).
-	lim := int((min(octetLimit, uint(len(runeSlice)*2+1))*8 - 1) / 7)
-
-	fr, to := 0, lim
-	for fr < len(runeSlice) {
-		if to > len(runeSlice) {
-			to = len(runeSlice)
+	limit := int((min(octetLimit, uint(len(septets)+1))*8 - 1) / 7)
+	for start := 0; start < len(septets); {
+		end := min(start+limit, len(septets))
+		if end > start && septets[end-1] == escapeSequence {
+			end--
 		}
-
-		to = determineTo(fr, to, lim, runeSlice)
-		if to == fr {
+		if end == start {
 			return nil, fmt.Errorf("split limit cannot fit a GSM character")
 		}
-
-		septets, err := GSM7BIT.Encode(string(runeSlice[fr:to]))
-		if err != nil {
-			return nil, err
-		}
-		// TS 23.040 §9.2.3.24: a six-octet UDH needs one fill bit.
-		// Pack from septets so standalone padding is not shifted into data.
-		seg := packGSM7WithFill(septets, 1)
-		// A boundary CR may need one extra octet under the package's
-		// TS 23.038 §6.1.2.3.1 convention. Keep that padding in the budget.
-		if uint(len(seg)) > octetLimit {
-			to--
-			if to == fr {
+		segment := packGSM7WithFill(septets[start:end], 1)
+		if uint(len(segment)) > octetLimit {
+			end--
+			if end > start && septets[end-1] == escapeSequence {
+				end--
+			}
+			if end == start {
 				return nil, fmt.Errorf("split limit cannot fit a padded GSM character")
 			}
-			septets, err = GSM7BIT.Encode(string(runeSlice[fr:to]))
-			if err != nil {
-				return nil, err
-			}
-			seg = packGSM7WithFill(septets, 1)
+			segment = packGSM7WithFill(septets[start:end], 1)
 		}
-
-		allSeg = append(allSeg, seg)
-		fr, to = to, to+lim
+		parts = append(parts, segment)
+		start = end
 	}
-
-	return
-}
-
-func determineTo(from int, to int, lim int, runeSlice []rune) int {
-	used := 0
-	for from < to {
-		cost := 1
-		if IsEscapeChar(runeSlice[from]) {
-			cost = 2
-		}
-		if used+cost > lim {
-			break
-		}
-		used += cost
-		from++
-	}
-	return from
-}
-
-func packGSM7WithFill(septets []byte, fillBits uint8) []byte {
-	if len(septets) == 0 {
-		return nil
-	}
-	bits := int(fillBits) + len(septets)*7
-	endsCR := septets[len(septets)-1] == 0x0d
-	packed := make([]byte, packedGSM7Octets(len(septets), fillBits, endsCR))
-	for i, septet := range septets {
-		bit := int(fillBits) + i*7
-		offset, shift := bit/8, uint(bit%8)
-		value := uint16(septet) << shift
-		packed[offset] |= byte(value)
-		if offset+1 < len(packed) {
-			packed[offset+1] |= byte(value >> 8)
-		}
-	}
-	// Apply the same CR-padding convention as GSM7(true), after alignment.
-	if bits%8 == 1 {
-		packed[len(packed)-1] |= 0x0d << 1
-	}
-	// TS 23.038 V19.0.0 §6.1.2.3.1 also requires a second CR followed
-	// by one zero bit when a wanted terminal CR ends on an octet boundary.
-	if bits%8 == 0 && endsCR {
-		packed[len(packed)-1] = 0x0d
-	}
-	return packed
-}
-
-func packedGSM7Octets(septetCount int, fillBits uint8, endsCR bool) int {
-	bits := int(fillBits) + septetCount*7
-	octets := (bits + 7) / 8
-	if septetCount > 0 && bits%8 == 0 && endsCR {
-		octets++
-	}
-	return octets
+	return parts, nil
 }
 
 type ascii struct{}
@@ -332,7 +248,7 @@ func (*ascii) Decode(data []byte) (string, error) {
 func (*ascii) DataCoding() byte { return ASCIICoding }
 
 func (*ascii) ShouldSplit(text string, octetLimit uint) bool {
-	return uint(len(text)) > octetLimit
+	return isASCII(text) && uint(len(text)) > octetLimit
 }
 
 func (c *ascii) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
@@ -369,8 +285,9 @@ func (*iso88591) Decode(data []byte) (string, error) {
 
 func (*iso88591) DataCoding() byte { return LATIN1Coding }
 
-func (*iso88591) ShouldSplit(text string, octetLimit uint) bool {
-	return uint(len([]rune(text))) > octetLimit
+func (c *iso88591) ShouldSplit(text string, octetLimit uint) bool {
+	encoded, err := c.Encode(text)
+	return err == nil && uint(len(encoded)) > octetLimit
 }
 
 func (c *iso88591) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
@@ -453,8 +370,9 @@ func (*iso88595) Decode(data []byte) (string, error) {
 
 func (*iso88595) DataCoding() byte { return CYRILLICCoding }
 
-func (*iso88595) ShouldSplit(text string, octetLimit uint) bool {
-	return uint(len([]rune(text))) > octetLimit
+func (c *iso88595) ShouldSplit(text string, octetLimit uint) bool {
+	encoded, err := c.Encode(text)
+	return err == nil && uint(len(encoded)) > octetLimit
 }
 
 func (c *iso88595) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
@@ -501,8 +419,9 @@ func (*iso88598) Decode(data []byte) (string, error) {
 
 func (*iso88598) DataCoding() byte { return HEBREWCoding }
 
-func (*iso88598) ShouldSplit(text string, octetLimit uint) bool {
-	return uint(len([]rune(text))) > octetLimit
+func (c *iso88598) ShouldSplit(text string, octetLimit uint) bool {
+	encoded, err := c.Encode(text)
+	return err == nil && uint(len(encoded)) > octetLimit
 }
 
 func (c *iso88598) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
@@ -537,19 +456,35 @@ func (c *iso88598) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
 	return segments, nil
 }
 
-type ucs2 struct{}
+type ucs2 struct{ strict bool }
 
-func (*ucs2) Encode(str string) ([]byte, error) {
-	tmp := unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM)
-	return encode(str, tmp.NewEncoder())
+func (c *ucs2) Encode(text string) ([]byte, error) {
+	// Validate before rune conversion can replace malformed UTF-8 (RFC 3629 §3).
+	if !utf8.ValidString(text) {
+		return nil, fmt.Errorf("text is not valid UTF-8")
+	}
+	if text == "" {
+		return []byte{}, nil
+	}
+	if c.strict {
+		return smsucs2.Encode([]rune(text))
+	}
+	return smsucs2.EncodeUTF16([]rune(text))
 }
 
-func (*ucs2) Decode(data []byte) (string, error) {
-	tmp := unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM)
-	return decode(data, tmp.NewDecoder())
+func (*ucs2) Decode(src []byte) (string, error) {
+	text, err := smsucs2.Decode(src)
+	return string(text), err
 }
 
-func (*ucs2) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
+func (c *ucs2) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
+	if !utf8.ValidString(text) {
+		return false
+	}
+	if c.strict {
+		encoded, err := c.Encode(text)
+		return err == nil && uint(len(encoded)) > octetLimit
+	}
 	octets := 0
 	for _, r := range text {
 		octets += 2
@@ -563,6 +498,9 @@ func (*ucs2) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
 func (c *ucs2) EncodeSplit(text string, octetLimit uint) (allSeg [][]byte, err error) {
 	if octetLimit == 0 {
 		return nil, fmt.Errorf("split limit must be positive")
+	}
+	if _, err := c.Encode(text); err != nil {
+		return nil, err
 	}
 	runes := []rune(text)
 	for from := 0; from < len(runes); {
@@ -598,7 +536,7 @@ func (*ucs2) DataCoding() byte { return UCS2Coding }
 
 var (
 	// GSM7BIT is gsm-7bit encoding.
-	GSM7BIT Encoding = &gsm7bit{packed: false}
+	GSM7BIT Encoding = &gsm7bit{}
 
 	// GSM7BITPACKED is packed gsm-7bit encoding.
 	// Most of SMSC(s) use unpack version.
@@ -623,8 +561,17 @@ var (
 	// HEBREW encoding.
 	HEBREW Encoding = &iso88598{}
 
-	// UCS2 encoding.
+	// UCS2 is UTF-16BE without a BOM, including surrogate pairs for scalars
+	// above U+FFFF. This interoperability extension carries SMPP data_coding
+	// 0x08 (SMPP v3.4 §5.2.19); it is not strict UCS2. Use UCS2Strict for the
+	// 16-bit alphabet of TS 23.038 §6.2.3. Both decoders accept UTF-16 pairs
+	// and return go-sms errors and any decoded prefix for malformed input.
 	UCS2 Encoding = &ucs2{}
+
+	// UCS2Strict encodes the strict UCS2 alphabet of TS 23.038 §6.2.3,
+	// rejecting scalars above U+FFFF. It carries the same SMPP coding 0x08
+	// and has the same tolerant UTF-16BE decoder as UCS2.
+	UCS2Strict Encoding = &ucs2{strict: true}
 )
 
 var codingMap = map[byte]Encoding{
@@ -653,34 +600,24 @@ func FromDataCoding(code byte) (enc Encoding) {
 		return &opaque8bit{coding: code}
 	}
 	underlying := GSM7BIT
-	// ETSI TS 23.038 V19.0.0 §4, unchanged in 3GPP V20.0.0 (2026-06),
-	// defines GSM SMS DCS groups beyond SMPP's direct codes.
-	// Reserved values retain the GSM default alphabet fallback.
-	switch {
-	case code >= 0x10 && code <= 0x7f:
-		if code&0x0c == 0x0c {
-			// TS 23.038 V19.0.0 §4, unchanged in 3GPP V20.0.0 (2026-06):
-			// a reserved alphabet selects the
-			// receiver's GSM default fallback, including when bit 5 is set.
-			break
-		}
-		if code&0x20 != 0 {
-			// TS 23.038 §4 selects TS 23.042 compression. This package does not
-			// implement that codec, so preserve raw binary rather than emit text
-			// with a data_coding value falsely claiming compression.
-			underlying = BINARY8BIT2
-		} else {
-			switch code & 0x0c {
-			case 0x04:
-				underlying = BINARY8BIT2
-			case 0x08:
-				underlying = UCS2
-			}
-		}
-	case code&0xf0 == 0xe0 && code&0x04 == 0:
-		underlying = UCS2
-	case code >= 0xf0 && code <= 0xf7 && code&0x04 != 0:
+	// Preserve SMPP's direct reserved values 0x0b, 0x0c and 0x0f exactly.
+	if code < 0x10 {
+		return NewCustomEncoding(code, underlying)
+	}
+	// TS 23.038 §4 interpretation beyond SMPP v3.4 §5.2.19's direct
+	// values is a lenient interoperability extension. Delegate reserved-bit
+	// interpretation too: E4-E7/EC-EF select UCS2; FC-FF select binary.
+	dcs := tpdu.DCS(code)
+	if dcs.Compressed() {
+		// TS 23.038 §4 selects TS 23.042 compression, which is unsupported.
 		underlying = BINARY8BIT2
+	} else {
+		switch dcs.Alphabet() {
+		case tpdu.Alpha8Bit:
+			underlying = BINARY8BIT2
+		case tpdu.AlphaUCS2:
+			underlying = UCS2
+		}
 	}
 	return NewCustomEncoding(code, underlying)
 }
@@ -689,7 +626,9 @@ func FromDataCoding(code byte) (enc Encoding) {
 // that split a string into multiple segments
 // Each segment string, when encoded, must be within a certain octet limit
 type Splitter interface {
-	// ShouldSplit check if the encoded data of given text should be splitted under octetLimit
+	// ShouldSplit reports whether the encoded text exceeds octetLimit.
+	// It returns false when text cannot be encoded, so callers use Encode
+	// to obtain the error with its offset in the complete message.
 	ShouldSplit(text string, octetLimit uint) (should bool)
 	EncodeSplit(text string, octetLimit uint) ([][]byte, error)
 }

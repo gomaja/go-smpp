@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
-
-	"golang.org/x/text/transform"
 )
 
 func TestGSM7PackedSecondCRPadding(t *testing.T) {
@@ -22,16 +19,9 @@ func TestGSM7PackedSecondCRPadding(t *testing.T) {
 		if err != nil || !bytes.Equal(raw, want) {
 			t.Errorf("count=%d raw=%x want=%x err=%v", count, raw, want, err)
 		}
-		for _, streaming := range []bool{false, true} {
-			var got []byte
-			if streaming {
-				got, err = io.ReadAll(GSM7(true).NewDecoder().Reader(&singleByteReader{src: want}))
-			} else {
-				got, err = GSM7(true).NewDecoder().Bytes(want)
-			}
-			if err != nil || string(got) != text {
-				t.Errorf("count=%d streaming=%t got=%q want=%q err=%v", count, streaming, got, text, err)
-			}
+		decoded, err := GSM7BITPACKED.Decode(want)
+		if err != nil || decoded != text {
+			t.Errorf("count=%d got=%q want=%q err=%v", count, decoded, text, err)
 		}
 		got, err := DecodeGSM7Packed(want, 0, -1)
 		if err != nil || got != text {
@@ -64,33 +54,6 @@ func TestGSM7PackedSecondCRPaddingWithFill(t *testing.T) {
 	}
 }
 
-func TestGSM7PackedSecondCRPaddingShortDestination(t *testing.T) {
-	encoder := GSM7(true).NewEncoder()
-	first := make([]byte, 7)
-	nDst, nSrc, err := encoder.Transform(first, []byte("AAAAAAA\r"), true)
-	if nDst != 7 || nSrc != 8 || !errors.Is(err, transform.ErrShortDst) {
-		t.Fatalf("first transform=(%d,%d,%v)", nDst, nSrc, err)
-	}
-	last := make([]byte, 1)
-	nDst, nSrc, err = encoder.Transform(last, nil, true)
-	if nDst != 1 || nSrc != 0 || err != nil || last[0] != 0x0d {
-		t.Fatalf("padding transform=(%d,%d,%v) dst=%x", nDst, nSrc, err, last)
-	}
-	nDst, nSrc, err = encoder.Transform(last, nil, true)
-	if nDst != 0 || nSrc != 0 || err != nil {
-		t.Fatalf("repeated EOF=(%d,%d,%v)", nDst, nSrc, err)
-	}
-	encoder.Reset()
-	raw, err := encoder.Bytes([]byte("AAAAAA\r"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	nDst, nSrc, err = encoder.Transform(last, nil, true)
-	if nDst != 0 || nSrc != 0 || err != nil {
-		t.Fatalf("repeated EOF after partial-octet CR=(%d,%d,%v) raw=%x", nDst, nSrc, err, raw)
-	}
-}
-
 func TestGSM7PackedTerminalCRNeighbors(t *testing.T) {
 	for _, count := range []int{1, 7, 9, 15, 17} {
 		text := strings.Repeat("A", count-1) + "\r"
@@ -111,7 +74,7 @@ func TestGSM7PackedTerminalCRNeighbors(t *testing.T) {
 
 func TestGSM7PackedSecondCRPaddingBudgets(t *testing.T) {
 	text := "AAAAAAA\r"
-	for _, enc := range []Encoding{GSM7BITPACKED, &gsm7bit{packed: true}} {
+	for _, enc := range []Encoding{GSM7BITPACKED} {
 		if !enc.(Splitter).ShouldSplit(text, 7) || enc.(Splitter).ShouldSplit(text, 8) {
 			t.Error("eight septets ending CR require eight octets including duplicate CR")
 		}
@@ -204,5 +167,25 @@ func TestFromDataCodingUnsupportedSMPPAlphabets(t *testing.T) {
 				t.Errorf("Decode=%q err=%v", text, err)
 			}
 		})
+	}
+}
+
+func TestGSM7PackedNonzeroFinalPadBit(t *testing.T) {
+	// Preserve the two existing decode contracts on a noncanonical final
+	// padding bit. The standalone decoder recognized an exact 0x0d octet;
+	// the fill/count helper inferred padding from septets alone.
+	for _, tc := range []struct {
+		last       byte
+		standalone string
+	}{{0x0d, "AAAAAAA\r"}, {0x8d, "AAAAAAA\r\r"}} {
+		wire := []byte{0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x1b, tc.last}
+		got, err := GSM7BITPACKED.Decode(wire)
+		if err != nil || got != tc.standalone {
+			t.Errorf("standalone %x=%q,%v; want%q", wire, got, err, tc.standalone)
+		}
+		got, err = DecodeGSM7Packed(wire, 0, -1)
+		if err != nil || got != "AAAAAAA\r" {
+			t.Errorf("fill/count helper %x=%q,%v", wire, got, err)
+		}
 	}
 }

@@ -308,22 +308,33 @@ func TestPackedDefaultNilRawSplit(t *testing.T) {
 	}
 }
 
-func TestRawNilEncodingPreservesSelectionAndCoding(t *testing.T) {
+func TestRawNilEncodingSelectionBeforeAndAfterSplit(t *testing.T) {
 	initial := data.GSM7BIT
+	configured, err := data.NewGSM7(data.GSM7Options{LockingShift: 1, SingleShift: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredPacked, err := data.NewGSM7(data.GSM7Options{Packed: true, LockingShift: 1, SingleShift: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		enc  data.Encoding
 	}{
 		{"initial", initial}, {"ASCII", data.ASCII}, {"packed", data.GSM7BITPACKED},
+		{"configured", configured}, {"configured_packed", configuredPacked},
+		{"wrapped", data.NewCustomEncoding(0, configured)}, {"nil", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			saved := data.GSM7BIT
 			t.Cleanup(func() { data.GSM7BIT = saved })
 			data.GSM7BIT = tc.enc
+			effective := data.DefaultGSM7()
 			for _, constructor := range []bool{false, true} {
-				for _, count := range []int{1, 170} {
+				for _, count := range []int{0, 1, 170} {
 					text := strings.Repeat("A", count)
-					raw, err := tc.enc.Encode(text)
+					raw, err := effective.Encode(text)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -357,24 +368,32 @@ func TestRawNilEncodingPreservesSelectionAndCoding(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if packet.Message.Encoding() != nil {
-						t.Error("splitting changed source nil encoding")
+					if len(parts) == 1 {
+						if parts[0] != packet || packet.Message.Encoding() != effective {
+							t.Error("single part did not resolve the source encoding")
+						}
+					} else if packet.Message.Encoding() != nil {
+						t.Error("multipart split changed the source encoding")
 					}
 					var joined strings.Builder
 					for _, part := range parts {
-						if part.Message.Encoding() != nil {
-							t.Error("split part changed nil encoding")
+						if part.Message.Encoding() != effective {
+							t.Fatal("split part did not retain the effective default")
 						}
 						wire := pdu.NewBuffer(nil)
 						if err := part.Message.Marshal(wire); err != nil {
 							t.Fatal(err)
 						}
-						if wire.Bytes()[0] != 0 {
-							t.Errorf("split coding=%02x; want 00", wire.Bytes()[0])
+						if wire.Bytes()[0] != effective.DataCoding() {
+							t.Errorf("split coding=%02x; want %02x", wire.Bytes()[0], effective.DataCoding())
 						}
-						got, err := packedReviewReceived(t, part).GetMessage()
+						local, err := part.Message.GetMessageWithEncoding(part.Message.Encoding())
 						if err != nil {
 							t.Fatal(err)
+						}
+						got, err := packedReviewReceived(t, part).GetMessage()
+						if err != nil || got != local {
+							t.Fatalf("parsed text=%q,%v; local=%q", got, err, local)
 						}
 						joined.WriteString(got)
 					}

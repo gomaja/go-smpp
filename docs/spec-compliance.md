@@ -799,9 +799,12 @@ default lookup: a nil `GSM7BIT` selects the built-in unpacked default codec.
 Coding lookup, encoding selection, text constructors and packed alphabet
 resolution all use that policy. Nil text encoding arguments resolve the
 effective default before selecting NLI IEs. Raw setters retain nil in
-`Encoding()` and marshal data_coding 0 regardless of the replacement's coding;
-codec operations and segmentation budgets resolve the effective default
-locally without changing that stored selection, including on split parts.
+`Encoding()` and marshal data_coding 0 regardless of the replacement's coding.
+`GetMessageWithEncoding(nil)` uses the effective default without changing the
+stored encoding. `Split()` resolves nil on every returned message to the
+effective codec, retaining its data_coding as before.
+Thus an ASCII default gives split results coding 1. A single part resolves the
+source in place; multipart splitting leaves the source encoding unchanged.
 These corrections are listed in
 the [behavior-change table](../README.md#pdus-and-encoding).
 

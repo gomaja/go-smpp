@@ -181,7 +181,7 @@ func (c *ShortMessage) SetUDH(udh UDH) error {
 
 // SetMessageDataWithEncoding sets the raw data used for PDU marshaling.
 // A nil encoding remains nil and marshals as SMSC-default coding 0
-// (SMPP v3.4 Issue 1.2 §5.2.19).
+// (SMPP v3.4 Issue 1.2 §5.2.19). Split resolves it on returned parts.
 func (c *ShortMessage) SetMessageDataWithEncoding(d []byte, enc data.Encoding) error {
 	if err := c.validatePayload(d); err != nil {
 		return err
@@ -219,7 +219,11 @@ func (c *ShortMessage) GetMessage() (st string, err error) {
 }
 
 // GetMessageWithEncoding returns (decoded) underlying message.
+// A nil encoding selects data.DefaultGSM7(), independently of the stored codec.
 func (c *ShortMessage) GetMessageWithEncoding(enc data.Encoding) (st string, err error) {
+	if enc == nil {
+		enc = data.DefaultGSM7()
+	}
 	if packedGSMAlphabet(enc) {
 		// SMPP carries an octet length, not a septet count. Retain exact
 		// source text only while its encoding and all selected NLI IEs
@@ -311,7 +315,8 @@ func (c *ShortMessage) payloadLimit() int {
 // split splits one short message into multiple short messages with UDH according
 // to 3GPP TS 23.040 section 9.2.3.24.1.
 //
-// A message that fits its encoded budget is returned unchanged.
+// A message that fits its encoded budget is returned in place. Returned parts
+// resolve a nil encoding to data.DefaultGSM7(), retaining its data_coding.
 func (c *ShortMessage) split() ([]*ShortMessage, error) {
 	// Chunking stays local pending https://github.com/gomaja/go-sms/issues/25.
 	encoding := c.enc
@@ -334,7 +339,7 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 	// SMPP GSM carries one septet per octet; packed GSM uses octet budgets.
 	limit := c.payloadLimit()
 	if limit >= 0 && len(payload) <= limit {
-		c.messageData = payload
+		c.messageData, c.enc = payload, encoding
 		return []*ShortMessage{c}, nil
 	}
 	// Replace old concatenation metadata, preserving its reference width and
@@ -476,7 +481,7 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 		if wideReference {
 			partUDH[0] = NewIEConcatMessage16Bit(byte(len(segments)), byte(i+1), reference)
 		}
-		part := &ShortMessage{enc: c.enc, SmDefaultMsgID: c.SmDefaultMsgID, messageData: segment, udHeader: partUDH}
+		part := &ShortMessage{enc: encoding, SmDefaultMsgID: c.SmDefaultMsgID, messageData: segment, udHeader: partUDH}
 		if len(segmentText) > 0 {
 			part.message = segmentText[i]
 		}

@@ -179,11 +179,15 @@ func (*gsm7bitPacked) Encode(text string) ([]byte, error) {
 	if len(septets) == 0 {
 		return []byte{}, nil
 	}
-	return packGSM7WithFill(septets, 0), nil
+	return gsm7.Pack7BitCR(septets, 0)
 }
 
 func (*gsm7bitPacked) Decode(src []byte) (string, error) {
-	return decodeGSM7Packed(src, 0, -1, true)
+	septets, err := unpackGSM7(src, 0, -1)
+	if err != nil {
+		return "", err
+	}
+	return decodeGSM7(septets)
 }
 
 func (*gsm7bitPacked) DataCoding() byte { return GSM7BITCoding }
@@ -212,7 +216,10 @@ func (*gsm7bitPacked) EncodeSplit(text string, octetLimit uint) ([][]byte, error
 		if end == start {
 			return nil, fmt.Errorf("split limit cannot fit a GSM character")
 		}
-		segment := packGSM7WithFill(septets[start:end], 1)
+		segment, err := gsm7.Pack7BitCR(septets[start:end], 1)
+		if err != nil {
+			return nil, err
+		}
 		if uint(len(segment)) > octetLimit {
 			end--
 			if end > start && septets[end-1] == escapeSequence {
@@ -221,7 +228,10 @@ func (*gsm7bitPacked) EncodeSplit(text string, octetLimit uint) ([][]byte, error
 			if end == start {
 				return nil, fmt.Errorf("split limit cannot fit a padded GSM character")
 			}
-			segment = packGSM7WithFill(septets[start:end], 1)
+			segment, err = gsm7.Pack7BitCR(septets[start:end], 1)
+			if err != nil {
+				return nil, err
+			}
 		}
 		parts = append(parts, segment)
 		start = end

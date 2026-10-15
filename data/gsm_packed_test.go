@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/gomaja/go-sms/encoding/gsm7"
 )
 
 func TestGSM7PackedSecondCRPadding(t *testing.T) {
@@ -20,12 +22,12 @@ func TestGSM7PackedSecondCRPadding(t *testing.T) {
 			t.Errorf("count=%d raw=%x want=%x err=%v", count, raw, want, err)
 		}
 		decoded, err := GSM7BITPACKED.Decode(want)
-		if err != nil || decoded != text {
-			t.Errorf("count=%d got=%q want=%q err=%v", count, decoded, text, err)
+		if err != nil || decoded != text+"\r" {
+			t.Errorf("count=%d got=%q want=%q err=%v", count, decoded, text+"\r", err)
 		}
 		got, err := DecodeGSM7Packed(want, 0, -1)
-		if err != nil || got != text {
-			t.Errorf("count=%d inferred=%q want=%q err=%v", count, got, text, err)
+		if err != nil || got != text+"\r" {
+			t.Errorf("count=%d inferred=%q want=%q err=%v", count, got, text+"\r", err)
 		}
 		got, err = DecodeGSM7Packed(want, 0, count)
 		if err != nil || got != text {
@@ -42,12 +44,15 @@ func TestGSM7PackedSecondCRPaddingWithFill(t *testing.T) {
 			}
 			septets := append(bytes.Repeat([]byte{0x41}, count-1), 0x0d)
 			want := append(referenceGSM7Pack(septets, fill), 0x0d)
-			raw := packGSM7WithFill(septets, fill)
+			raw, packErr := gsm7.Pack7BitCR(septets, int(fill))
+			if packErr != nil {
+				t.Fatal(packErr)
+			}
 			if !bytes.Equal(raw, want) {
 				t.Errorf("fill=%d count=%d raw=%x want=%x", fill, count, raw, want)
 			}
 			got, err := DecodeGSM7Packed(want, fill, -1)
-			if err != nil || got != strings.Repeat("A", count-1)+"\r" {
+			if err != nil || got != strings.Repeat("A", count-1)+"\r\r" {
 				t.Errorf("fill=%d count=%d decoded=%q err=%v", fill, count, got, err)
 			}
 		}
@@ -67,7 +72,7 @@ func TestGSM7PackedTerminalCRNeighbors(t *testing.T) {
 		}
 		got, err = DecodeGSM7Packed(raw, 0, -1)
 		if err != nil || got != text {
-			t.Errorf("count=%d inferred=%q want=%q err=%v", count, got, text, err)
+			t.Errorf("count=%d inferred=%q want=%q err=%v", count, got, text+"\r", err)
 		}
 	}
 }
@@ -95,14 +100,17 @@ func TestGSM7PackedSecondCRPaddingBudgets(t *testing.T) {
 		}
 		joined.WriteString(got)
 	}
-	if joined.String() != text {
-		t.Errorf("decoded segments=%q want=%q", joined.String(), text)
+	// The final one-septet part ends at an octet boundary after fill one;
+	// the dependency retains its duplicated CR on inferred decoding.
+	if joined.String() != text+"\r" {
+		t.Errorf("decoded segments=%q want=%q", joined.String(), text+"\r")
 	}
 }
 
 func TestGSM7PackedInferredPaddingAfterEscape(t *testing.T) {
-	// TS 23.038 §6.2.1.1: unassigned extensions fall back to the main
-	// alphabet. A terminal escaped @ or CR is content, not padding.
+	// Inference applies the CR profile before alphabet conversion. A final
+	// full-boundary CR is removed even after ESC; a zero septet is retained.
+	// Explicit counts retain both values for TS 23.038 section 6.2.1.1 fallback.
 	for fill := uint8(0); fill <= 6; fill++ {
 		for _, tail := range []byte{0, 0x0d} {
 			for _, escapeCount := range []int{1, 3} {
@@ -113,7 +121,11 @@ func TestGSM7PackedInferredPaddingAfterEscape(t *testing.T) {
 				septets := bytes.Repeat([]byte{0x41}, count-escapeCount-1)
 				septets = append(septets, bytes.Repeat([]byte{escapeSequence}, escapeCount)...)
 				septets = append(septets, tail)
-				want, err := GSM7BIT.Decode(septets)
+				content := septets
+				if tail == 0x0d {
+					content = content[:len(content)-1]
+				}
+				want, err := GSM7BIT.Decode(content)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -171,20 +183,16 @@ func TestFromDataCodingUnsupportedSMPPAlphabets(t *testing.T) {
 }
 
 func TestGSM7PackedNonzeroFinalPadBit(t *testing.T) {
-	// Preserve the two existing decode contracts on a noncanonical final
-	// padding bit. The standalone decoder recognized an exact 0x0d octet;
-	// the fill/count helper inferred padding from septets alone.
-	for _, tc := range []struct {
-		last       byte
-		standalone string
-	}{{0x0d, "AAAAAAA\r"}, {0x8d, "AAAAAAA\r\r"}} {
-		wire := []byte{0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x1b, tc.last}
+	// CR inference follows the dependency's septets for both entry points;
+	// an unused high bit does not change the retained doubled CR.
+	for _, last := range []byte{0x0d, 0x8d} {
+		wire := []byte{0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x1b, last}
 		got, err := GSM7BITPACKED.Decode(wire)
-		if err != nil || got != tc.standalone {
-			t.Errorf("standalone %x=%q,%v; want%q", wire, got, err, tc.standalone)
+		if err != nil || got != "AAAAAAA\r\r" {
+			t.Errorf("standalone %x=%q,%v", wire, got, err)
 		}
 		got, err = DecodeGSM7Packed(wire, 0, -1)
-		if err != nil || got != "AAAAAAA\r" {
+		if err != nil || got != "AAAAAAA\r\r" {
 			t.Errorf("fill/count helper %x=%q,%v", wire, got, err)
 		}
 	}

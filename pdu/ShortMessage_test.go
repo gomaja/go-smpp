@@ -8,6 +8,7 @@ import (
 
 	"github.com/gomaja/go-smpp/data"
 	"github.com/gomaja/go-smpp/errors"
+	"github.com/gomaja/go-sms/encoding/gsm7"
 	smsucs2 "github.com/gomaja/go-sms/encoding/ucs2"
 
 	"github.com/stretchr/testify/require"
@@ -623,20 +624,25 @@ func TestSplitDropsSARParameters(t *testing.T) {
 	require.Len(t, p.OptionalParameters, 5)
 }
 
-func TestSplitRejectsAmbiguousRawPackedPadding(t *testing.T) {
-	// Legacy zero padding cannot distinguish 167 A septets from 168 ending @.
-	raw := make([]byte, 147)
-	for i := 0; i < 167; i++ {
-		bit := i * 7
-		raw[bit/8] |= 0x41 << uint(bit%8)
-		if bit%8 > 1 {
-			raw[bit/8+1] |= 0x41 >> uint(8-bit%8)
-		}
-	}
+func TestSplitRetainsZeroSpareAsAt(t *testing.T) {
+	// Under CR inference this zero-filled spare septet is an actual @.
+	raw, err := gsm7.Pack7Bit(bytes.Repeat([]byte{'A'}, 167), 0)
+	require.NoError(t, err)
 	sm, err := NewBinaryShortMessageWithEncoding(raw, data.GSM7BITPACKED)
 	require.NoError(t, err)
-	_, err = sm.split()
-	require.Error(t, err)
+	parts, err := sm.split()
+	require.NoError(t, err)
+	var joined string
+	for _, part := range parts {
+		wire := NewBuffer(nil)
+		require.NoError(t, part.Marshal(wire))
+		var received ShortMessage
+		require.NoError(t, received.Unmarshal(wire, true))
+		text, err := received.GetMessageWithEncoding(data.GSM7BITPACKED)
+		require.NoError(t, err)
+		joined += text
+	}
+	require.Equal(t, strings.Repeat("A", 167)+"@", joined)
 	require.Equal(t, raw, sm.messageData)
 }
 
@@ -720,16 +726,40 @@ func TestCustomDefaultAlphabetUsesSuppliedCodec(t *testing.T) {
 		}
 	}
 }
-func TestSplitRejectsAmbiguousCRPackedPadding(t *testing.T) {
-	for _, text := range []string{strings.Repeat("A", 167), strings.Repeat("A", 167) + "\r", strings.Repeat("A", 167) + "@", strings.Repeat("A", 167) + "\r\r"} {
-		raw, err := data.GSM7BITPACKED.Encode(text)
+func TestSplitPackedTailsFollowCRPolicy(t *testing.T) {
+	prefix := strings.Repeat("A", 167)
+	for _, tc := range []struct {
+		text, inferred string
+		reject         bool
+	}{
+		{prefix, prefix, true},
+		{prefix + "\r", prefix + "\r\r", false},
+		{prefix + "@", prefix + "@", false},
+		{prefix + "\r\r", prefix + "\r\r", false},
+	} {
+		raw, err := data.GSM7BITPACKED.Encode(tc.text)
 		require.NoError(t, err)
 		sm, err := NewBinaryShortMessageWithEncoding(raw, data.GSM7BITPACKED)
 		require.NoError(t, err)
-		_, err = sm.split()
-		require.Error(t, err, "raw tail has no septet count for %q", text)
+		parts, err := sm.split()
+		if tc.reject {
+			require.Error(t, err, "whole CR pad still has no exact count")
+		} else {
+			require.NoError(t, err, "new CR policy defines the raw tail for %q", tc.text)
+			var joined string
+			for _, part := range parts {
+				wire := NewBuffer(nil)
+				require.NoError(t, part.Marshal(wire))
+				var received ShortMessage
+				require.NoError(t, received.Unmarshal(wire, true))
+				text, err := received.GetMessageWithEncoding(data.GSM7BITPACKED)
+				require.NoError(t, err)
+				joined += text
+			}
+			require.Equal(t, tc.inferred, joined)
+		}
 		require.Equal(t, raw, sm.messageData)
-		known, err := NewShortMessageWithEncoding(text, data.GSM7BITPACKED)
+		known, err := NewShortMessageWithEncoding(tc.text, data.GSM7BITPACKED)
 		require.NoError(t, err)
 		_, err = known.split()
 		require.NoError(t, err, "retained original source text resolves the count")
@@ -875,7 +905,12 @@ func TestPackedTerminalCRPaddingOnWire(t *testing.T) {
 			m := q.(*SubmitSM).Message
 			got, err := m.GetMessageWithEncoding(data.GSM7BITPACKED)
 			require.NoError(t, err)
-			require.Equal(t, text, got)
+			expected := text
+			if (packedFillBits(header.UDHL())+n*7)%8 == 0 {
+				// TS 23.038 §6.1.2.3.1: inferred receive keeps the doubled CR.
+				expected += "\r"
+			}
+			require.Equal(t, expected, got)
 		}
 	}
 }

@@ -29,6 +29,13 @@ CR 0243 (CBS language indication, §5) and 23.040 CR 0169 revision 3
 (emergency-SMS routing) are incorporated in V20. Unapproved proposals are not
 applied as corrections. The SMPP v3.4 Issue 1.2 source was unchanged.
 
+National-language behavior was also rechecked against the current V20 sources
+on **2026-10-15**: TS 23.038 §§6.2.1.2, 6.2.1.2.4–5 and Annex A, and TS 23.040
+§§9.2.3.24.15–16. No newer approved correction affecting these clauses was
+found. Table 6.2.1.2.4.1 assigns identifiers 1–13; zero and 14–255 are reserved.
+Annex A.2 has thirteen single-shift tables; Annex A.3 has twelve locking-shift
+tables because Spanish A.3.2 is void.
+
 UTF-8 validation follows RFC 3629 §3; UTF-16 conversion follows RFC 2781
 §§2.1–2.2 and the fixed UTF-16BE form in §3.3. The RFC Editor records for
 [RFC 3629](https://www.rfc-editor.org/rfc/rfc3629.json) and
@@ -63,8 +70,9 @@ this implementation unless those features are implemented directly.
   shift tables are in sections 6.2.1.2 and Annex A.
 
 - UDH and concatenated SMS behavior follows 3GPP TS 23.040 section 9.2.3.24, the
-  8-bit concatenation IE in section 9.2.3.24.1, and the 16-bit concatenation IE
-  in section 9.2.3.24.8.
+  8-bit concatenation IE in section 9.2.3.24.1, the 16-bit concatenation IE in
+  section 9.2.3.24.8, and the national-language single/locking IEs in sections
+  9.2.3.24.15–16.
 
 - 3GPP TS 23.041 is relevant to SMPP v5 broadcast-message support. The current
   v3.4 API does not expose broadcast PDUs.
@@ -668,46 +676,78 @@ receive examples enforce these bounds before indexing reassembly buffers.
 
 ### Splitting budgets
 
-GSM-alphabet custom encodings use escape-safe 160/153 septet budgets. `data.UCS2`
-uses encoded UTF-16 octets, preserving surrogate pairs; `data.UCS2Strict` uses
-two octets per BMP scalar. The wire coding remains `0x08` for both.
+GSM-alphabet encodings use escape-safe septet budgets. An unpacked GSM7 part
+holds `160 - ceil(headerOctets * 8 / 7)` septets; extension characters consume
+two. The complete header includes caller IEs, NLI IEs and concatenation
+metadata (TS 23.038 §6.2.1.2; TS 23.040 §9.2.3.24). The familiar 160/153 limits
+apply to no header or an 8-bit concatenation IE alone; a 16-bit reference and
+additional IEs reduce the available payload further. Packed GSM7 uses the
+actual header fill alignment and accounts for the chosen CR-padding convention.
+
+`data.UCS2` uses encoded UTF-16 octets, preserving surrogate pairs;
+`data.UCS2Strict` uses two octets per BMP scalar. The wire coding remains
+`0x08` for both.
 
 A caller-supplied custom codec without a splitter constructs at most 254 octets
 including UDH (SMPP v3.4 §§5.2.21–22); longer text returns an error. Parsed
 255-octet fields re-marshal byte-identically.
 
-Splitting replaces UDH concatenation metadata and drops stale SAR TLVs.
-`SubmitSM.Split` assigns fresh sequence numbers to generated parts and preserves
-unrelated TLVs. Each UDH reduces the payload budget; uncompressed octet codings
-use 140 octets minus header size (TS 23.040 §9.2.3.24).
+Splitting replaces UDH concatenation references, counts and part numbers while
+retaining the reference width selected by the last caller-supplied
+concatenation IE. Thus a 16-bit IE staged through `SetUDH` remains 16-bit in
+generated parts (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). It retains other caller IEs,
+including the NLI IEs on every part, and drops stale SAR TLVs. `SubmitSM.Split`
+assigns fresh sequence numbers to generated parts and preserves unrelated TLVs.
+Uncompressed octet codings use 140 octets minus header size; construction also
+checks SMPP's octet-length field (v3.4 §§5.2.21–22).
+
+Received GSM7 messages with NLI IEs are split over their original septets,
+preserving those IEs rather than decoding text and choosing tables again. The
+raw packed ambiguity guard still applies: without retained source text,
+ambiguous tails cannot be safely resegmented.
 
 ### Packed GSM padding
 
-SMPP supplies an octet length without a GSM septet count. Packed encoding uses
-CR in a spare full septet, borrowing TS 23.038 §6.1.2.3.1's USSD convention; SMS
-packing's normative fill rule is zero padding (§6.1.2.1.1). Decoding supports
-both conventions and calculates septet capacity after UDH fill bits.
+SMPP supplies an octet length without a GSM septet count. Built-in GSM alphabet
+conversion and all bit packing delegate to go-sms, including national-language
+messages with UDH alignment. `gsm7.Pack7BitCR` uses CR in seven spare bits and
+adds a second CR when a wanted terminal CR ends on an octet boundary, borrowing
+TS 23.038 §6.1.2.3.1's USSD convention. SMS packing's normative fill rule is
+zero padding (§6.1.2.1.1).
 
-The USSD CR-padding rule also doubles a terminal CR on an octet boundary (TS
-23.038 §6.1.2.3.1).
+Inferred receiving uses `gsm7.Unpack7BitCR`: after UDH fill alignment, a final
+CR is removed only when the available bits end with a complete septet (TS
+23.038 §6.1.2.3.1). A genuine final zero septet (`@` in the default alphabet) is retained; doubled CRs
+are retained doubled. Zero-filled seven-spare-bit payloads therefore produce
+an extra `@` in the default alphabet. The rule applies before alphabet conversion, including after
+ESC. These differ from the former local inference.
 
-The alphabet conversion delegates to go-sms, but local bit packing, padding
-inference and packed segmentation remain unchanged pending
-[go-sms #19](https://github.com/gomaja/go-sms/issues/19). Its current APIs expose
-UDH fill bits with SMS zero padding, or USSD CR padding without UDH fill bits;
-neither combines alignment and the chosen CR convention. Packed decoding does
-not switch to `Unpack7BitUSSD`, whose doubled-CR behavior differs. This is a
-temporary boundary for the existing implementation, not a change to SMS's
-normative zero-fill rule or a standards defect in those APIs.
+`data.DecodeGSM7Packed` accepts an explicit septet count for default-alphabet
+text: it extracts with `gsm7.Unpack7Bit`, rejects counts beyond the available
+payload, then decodes exactly that many septets. Count `-1` selects inferred
+CR decoding. Raw septets are available directly through these go-sms APIs.
+Legacy packed PDU setters share the public decoder's replaceable `GSM7BIT`
+alphabet, including through custom wrappers. Standalone packed codecs remain
+independent of that variable, and `NewGSM7` sending keeps its explicit tables.
+Getters retain known original text only while its encoding matches the stored
+bytes and the current UDH contains every configured selector with its selected
+value (TS 23.040 §9.2.3.24.15–16).
 
-The inferred decoder follows the padding convention; `data.DecodeGSM7Packed`
-accepts an explicit count when available. Raw packed messages are resegmented
-only when decode and re-encode preserve their bytes, with ambiguous tails
-additionally requiring retained original source text. Packed splitting moves
-boundaries to avoid ambiguous tails in generated parts.
+Received NLI messages preserve original septets when splitting; other raw
+packed messages must decode and re-encode byte-identically. Ambiguous CR tails
+still require retained original source text. Packed splitting uses the same
+go-sms pack/unpack policy to choose boundaries that preserve septets, checks
+the actual octet budget, and keeps escape pairs intact. Segmentation and UDH
+handling remain in go-smpp (TS 23.040 §9.2.3.24.1).
 
-UDH fill bits have no receiver meaning (TS 23.040 §9.2.3.24) and are ignored. An
-escaped final septet is retained rather than interpreted as padding.
+Multipart packed segmentation may now end a segment on a zero septet because
+the CR receive rule retains it (TS 23.038 §6.1.2.3.1). Part counts and segment
+bytes can therefore differ from the previous boundary policy: 300 `@` with
+caller UDH `02 70 00` now produces two 150-septet parts instead of three parts
+of 149/149/2 septets. Single-message encodings remain unchanged; byte identity
+for a fixed text/header encoding does not imply identical multipart output.
+
+UDH fill bits have no receiver meaning (TS 23.040 §9.2.3.24) and are ignored.
 
 The unavoidable text collisions are listed under [Known
 limitations](#known-limitations).
@@ -736,6 +776,67 @@ or go-sms's unpacked byte APIs; measure septet costs from the encoded output.
 fallback, so it is not a replacement for the previous buffer validator. Invalid
 `DecodeGSM7Packed` fill/count arguments return ordinary descriptive errors.
 See the [migration table](../README.md#pdus-and-encoding).
+
+### National-language GSM7
+
+`data.NewGSM7` takes `GSM7Options` with `Packed`, `LockingShift` and
+`SingleShift` fields to select locking and single-shift tables explicitly.
+The integer selectors correspond to go-sms `charset` identifiers; locking
+replaces the main table and single shift replaces the extension table independently (TS 23.038 §§6.2.1.2.2–4,
+Annex A). There is no best-language search or automatic fallback to another
+encoding. Alphabet conversion uses go-sms `gsm7.WithCharset` and
+`gsm7.WithExtCharset`; its typed encoder errors and permissive decoder are
+preserved. `ShouldSplit` is false on encoding failure, and empty encoding and
+split results are nonnil, as for the existing codecs.
+
+API selector zero means the default table and omission of that NLI IE. Send
+construction rejects unknown/reserved selectors and Spanish locking shift,
+whose table is void (Annex A.3.2). The supported national identifiers provide
+thirteen single-shift and twelve locking-shift tables. The configured codec
+keeps SMPP `data_coding=0x00`; table selection is carried in the UDH, not a new
+SMPP coding value (SMPP v3.4 §5.2.19).
+
+`ShortMessage.SetMessageWithEncoding` and `SetLongMessageWithEnc` merge the
+selected single-shift IE `0x24` and locking-shift IE `0x25` into the header.
+Matching caller NLI IEs and unrelated IEs are retained. Conflicting selectors,
+zero-valued manual NLI IEs, or a manual NLI with the wrong data length fail
+atomically. `SetUDH` also preserves a configured selection when replacing
+other IEs. The submit_sm, deliver_sm and submit_multi marshalers set wire UDHI
+when the header contains NLI IEs (TS 23.040 §§9.2.3.24.15–16).
+
+The manual constructors
+`pdu.NewIENationalLanguageSingleShift(int) (pdu.InfoElement, error)` and
+`pdu.NewIENationalLanguageLockingShift(int) (pdu.InfoElement, error)` validate
+one-octet wire identifiers; unlike the codec's omission sentinel, zero is
+rejected as a reserved transmitted NLI (TS 23.038 §6.2.1.2.4).
+
+For GSM7, `ShortMessage.GetMessage` delegates each received segment's UDH table
+selection and text decoding to go-sms `tpdu.DecodeUserData` with
+`tpdu.WithAllCharsets`. Absence selects the corresponding default table for
+that segment; no state carries across concatenated parts. Repeated IEs use the
+last applicable occurrence. Reserved or unsupported identifiers are skipped,
+so a later ignored IE does not erase an earlier applicable selection; if none
+remains, the relevant default applies (TS 23.038 §6.2.1.2.5; TS 23.040
+§§9.2.3.24.15–16). Spanish locking is a known identifier with explicit default
+fallback, so a received Spanish locking IE selects the default main table.
+
+Non-GSM codecs ignore NLI IEs during text decoding. Received IEs and their raw
+data remain accessible through `UDH()` and are retained on marshal;
+`IgnoredUDH()` exposes a bounded whole header ignored after a truncated final
+IE. Decoding does not rewrite either representation.
+
+SMPP has no packed flag: the peer agreement selects packed versus unpacked
+representation. Use `GetMessageWithEncoding(data.GSM7BITPACKED)` for a packed
+peer; the received UDH still controls table selection. Direct packed
+`NewGSM7` codec splitting keeps the existing one-fill-bit convention for a
+six-octet concatenation UDH. Complete NLI header layouts use PDU segmentation,
+which budgets and aligns the actual header as described above.
+
+These APIs add explicit table support. The compatibility changes are that
+text setters reject conflicting manual NLI IEs, receive getters honor NLI IEs
+that were previously ignored, and splitting preserves a caller-selected
+16-bit concatenation width. See the [client examples](../README.md#sending-national-language-text)
+and [migration table](../README.md#pdus-and-encoding).
 
 ### ISO-8859
 
@@ -875,7 +976,7 @@ preservation of Cyrillic/Hebrew controls.
 
 ### Unsupported codings
 
-National-language shift-table selection and TS 23.042 compression are not
-implemented. Opaque SMPP alphabets need a character-aware codec to split; custom
-codecs without a splitter use the construction limit in [Splitting
+TS 23.042 compression is not implemented. National-language GSM7 selection is
+supported as described above. Opaque SMPP alphabets need a character-aware codec
+to split; custom codecs without a splitter use the construction limit in [Splitting
 budgets](#splitting-budgets).

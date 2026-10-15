@@ -7,6 +7,7 @@ import (
 
 	"github.com/gomaja/go-smpp/data"
 	"github.com/gomaja/go-smpp/errors"
+	"github.com/gomaja/go-sms/encoding/gsm7"
 )
 
 var ref = uint32(0)
@@ -52,40 +53,40 @@ func NewLongMessage(message string) (s []*ShortMessage, err error) {
 
 // NewLongMessageWithEncoding returns long message splitted into multiple short message with encoding of choice
 func NewLongMessageWithEncoding(message string, enc data.Encoding) (s []*ShortMessage, err error) {
-	sm := &ShortMessage{
-		message: message,
-		enc:     enc,
+	sm := &ShortMessage{message: message, enc: enc}
+	if opts, gsm := gsm7Options(enc); gsm && (opts.LockingShift != 0 || opts.SingleShift != 0) {
+		if err := sm.SetLongMessageWithEnc(message, enc); err != nil {
+			return nil, err
+		}
 	}
 	return sm.split()
 }
 
 // SetMessageWithEncoding sets message with encoding.
 func (c *ShortMessage) SetMessageWithEncoding(message string, enc data.Encoding) error {
-	if enc == nil {
-		enc = data.GSM7BIT
-	}
-	header, err := c.headerBytes()
-	if err != nil {
-		return err
-	}
-	payload, err := encodeTextWithHeaderLength(message, enc, len(header))
-	if err != nil {
-		return err
-	}
-	if err = c.validatePayload(payload); err != nil {
-		return err
-	}
-	c.message, c.enc, c.messageData = message, enc, payload
-	return nil
+	return c.setTextMessage(message, enc, false)
 }
 
 // SetLongMessageWithEnc sets ShortMessage with message longer than  256 bytes
 // callers are expected to call Split() after this
 func (c *ShortMessage) SetLongMessageWithEnc(message string, enc data.Encoding) error {
+	return c.setTextMessage(message, enc, true)
+}
+
+func (c *ShortMessage) setTextMessage(message string, enc data.Encoding, long bool) error {
 	if enc == nil {
 		enc = data.GSM7BIT
 	}
-	header, err := c.headerBytes()
+	next := *c
+	var err error
+	next.udHeader, err = nationalLanguageHeader(enc, c.udHeader)
+	if err != nil {
+		return err
+	}
+	if c.ignoredUDH != nil && next.udHeader.hasNationalLanguage() {
+		return fmt.Errorf("replace the ignored UDH before selecting national language tables")
+	}
+	header, err := next.headerBytes()
 	if err != nil {
 		return err
 	}
@@ -93,7 +94,13 @@ func (c *ShortMessage) SetLongMessageWithEnc(message string, enc data.Encoding) 
 	if err != nil {
 		return err
 	}
-	c.message, c.enc, c.messageData = message, enc, payload
+	if !long {
+		if err := next.validatePayload(payload); err != nil {
+			return err
+		}
+	}
+	next.message, next.enc, next.messageData = message, enc, payload
+	*c = next
 	return nil
 }
 
@@ -133,6 +140,16 @@ func (c *ShortMessage) validatePayload(payload []byte) error {
 
 // SetUDH sets the user data header after validating the complete encoded field.
 func (c *ShortMessage) SetUDH(udh UDH) error {
+	// Preserve the selected sender tables when callers replace other IEs.
+	// An empty/raw message may stage a header before selecting its text codec.
+	opts, gsm := gsm7Options(c.enc)
+	if gsm && (c.message != "" || opts.LockingShift != 0 || opts.SingleShift != 0) {
+		var err error
+		udh, err = nationalLanguageHeader(c.enc, udh)
+		if err != nil {
+			return err
+		}
+	}
 	payload := c.messageData
 	if packedGSMAlphabet(c.enc) && packedFillBits(c.headerLength()) != packedFillBits(udh.UDHL()) {
 		// Raw packed data has no septet count. Changing its alignment must
@@ -194,12 +211,26 @@ func (c *ShortMessage) GetMessage() (st string, err error) {
 func (c *ShortMessage) GetMessageWithEncoding(enc data.Encoding) (st string, err error) {
 	if packedGSMAlphabet(enc) {
 		// SMPP carries an octet length, not a septet count. Retain exact
-		// source text when its encoding still matches the stored bytes.
+		// source text only while its encoding and all selected NLI IEs
+		// match the current bytes/header (TS 23.040 §9.2.3.24.15–16).
 		encoded, encodeErr := encodeTextWithHeaderLength(c.message, enc, c.headerLength())
-		if encodeErr == nil && bytes.Equal(encoded, c.messageData) {
+		matchingHeader, headerErr := nationalLanguageHeader(enc, c.udHeader)
+		if encodeErr == nil && headerErr == nil && len(matchingHeader) == len(c.udHeader) && bytes.Equal(encoded, c.messageData) {
 			return c.message, nil
 		}
-		return data.DecodeGSM7Packed(c.messageData, uint8(packedFillBits(c.headerLength())), -1)
+		if !c.udHeader.hasNationalLanguage() {
+			return data.DecodeGSM7Packed(c.messageData, uint8(packedFillBits(c.headerLength())), -1)
+		}
+		septets := gsm7.Unpack7BitCR(c.messageData, packedFillBits(c.headerLength()))
+		return decodeGSM7WithUDH(septets, c.udHeader)
+	}
+	if unpackedGSMAlphabet(enc) && c.udHeader.hasNationalLanguage() {
+		return decodeGSM7WithUDH(c.messageData, c.udHeader)
+	}
+	if opts, gsm := gsm7Options(enc); gsm && (opts.LockingShift != 0 || opts.SingleShift != 0) {
+		// An explicit decode codec selects packing, while received UDH selects
+		// the tables. Absent IEs mean defaults for this segment.
+		return decodeGSM7WithUDH(c.messageData, c.udHeader)
 	}
 	if len(c.messageData) > 0 {
 		st, err = enc.Decode(c.messageData)
@@ -223,27 +254,15 @@ func encodeTextWithHeaderLength(text string, enc data.Encoding, headerLength int
 	if text == "" {
 		return nil, nil
 	}
-	septets, err := data.GSM7BIT.Encode(text)
+	codec, err := unpackedGSMCodec(enc)
 	if err != nil {
 		return nil, err
 	}
-	fill := packedFillBits(headerLength)
-	// SMPP has no septet-count field. Borrow the CR spare-septet convention
-	// from TS 23.038 §6.1.2.3.1 to avoid interpreting zero padding as @.
-	bits := len(septets)*7 + fill
-	if bits%8 == 0 && septets[len(septets)-1] == 0x0d || (8-bits%8)%8 == 7 {
-		// TS 23.038 §6.1.2.3.1 also doubles a CR on an octet boundary.
-		septets = append(septets, 0x0d)
+	septets, err := codec.Encode(text)
+	if err != nil {
+		return nil, err
 	}
-	packed := make([]byte, (len(septets)*7+fill+7)/8)
-	for i, septet := range septets {
-		bit := fill + i*7
-		packed[bit/8] |= septet << (bit % 8)
-		if bit%8 > 1 {
-			packed[bit/8+1] |= septet >> (8 - bit%8)
-		}
-	}
-	return packed, nil
+	return gsm7.Pack7BitCR(septets, packedFillBits(headerLength))
 }
 
 func packedFillBits(headerLength int) int {
@@ -296,14 +315,22 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 		c.messageData, c.enc = payload, encoding
 		return []*ShortMessage{c}, nil
 	}
-	// Replace an old concatenation IE when resegmenting, retaining other IEs.
+	// Replace old concatenation metadata, preserving its reference width and
+	// every other IE (TS 23.040 sections 9.2.3.24.1 and 9.2.3.24.8).
 	var udh UDH
+	wideReference := false
 	for _, ie := range c.udHeader {
 		if ie.ID != data.UDH_CONCAT_MSG_8_BIT_REF && ie.ID != data.UDH_CONCAT_MSG_16_BIT_REF {
 			udh = append(udh, ie)
+		} else {
+			wideReference = ie.ID == data.UDH_CONCAT_MSG_16_BIT_REF
 		}
 	}
-	udh = append(UDH{NewIEConcatMessage(1, 1, 0)}, udh...)
+	concatIE := NewIEConcatMessage(1, 1, 0)
+	if wideReference {
+		concatIE = NewIEConcatMessage16Bit(1, 1, 0)
+	}
+	udh = append(UDH{concatIE}, udh...)
 	header, err := udh.MarshalBinary()
 	if err != nil {
 		return nil, err
@@ -317,7 +344,43 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 	}
 	var segments [][]byte
 	var segmentText []string
-	if splitter, ok := encoding.(data.Splitter); ok && !binaryAlphabet(encoding) {
+	if c.udHeader.hasNationalLanguage() && (unpackedGSMAlphabet(encoding) || packedGSMAlphabet(encoding)) {
+		septets := payload
+		if packedGSMAlphabet(encoding) {
+			original, encodeErr := encodeTextWithHeaderLength(c.message, encoding, c.headerLength())
+			matchingHeader, headerErr := nationalLanguageHeader(encoding, c.udHeader)
+			if encodeErr == nil && headerErr == nil && len(matchingHeader) == len(c.udHeader) && bytes.Equal(original, payload) {
+				// Verified source text supplies an exact count, including a
+				// terminal CR whose packed representation contains another CR.
+				codec, codecErr := unpackedGSMCodec(encoding)
+				if codecErr != nil {
+					return nil, codecErr
+				}
+				septets, err = codec.Encode(c.message)
+			} else {
+				if packedCountAmbiguous(payload, packedFillBits(c.headerLength())) {
+					return nil, fmt.Errorf("resegmenting ambiguous packed data requires the original text or a septet count")
+				}
+				septets = gsm7.Unpack7BitCR(payload, packedFillBits(c.headerLength()))
+			}
+			if err != nil {
+				return nil, err
+			}
+			limit = 160 - (len(header)*8+6)/7
+			segments, err = splitPackedSeptets(septets, limit, len(header))
+			for i, part := range segments {
+				segments[i], err = gsm7.Pack7BitCR(part, packedFillBits(len(header)))
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			segments, err = splitGSMSeptets(septets, limit)
+		}
+		if err != nil {
+			return nil, err
+		}
+	} else if splitter, ok := encoding.(data.Splitter); ok && !binaryAlphabet(encoding) {
 		text := c.message
 		if c.messageData != nil {
 			if packedGSMAlphabet(encoding) && packedCountAmbiguous(payload, packedFillBits(c.headerLength())) {
@@ -346,7 +409,7 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 			if encodeErr != nil {
 				return nil, encodeErr
 			}
-			segments, err = splitPackedSeptets(septets, limit, packedFillBits(len(header)))
+			segments, err = splitPackedSeptets(septets, limit, len(header))
 		} else {
 			segments, err = splitter.EncodeSplit(text, uint(limit))
 		}
@@ -378,14 +441,17 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 	if len(segments) > 255 {
 		return nil, fmt.Errorf("message requires %d segments, maximum is 255", len(segments))
 	}
-	reference := byte(getRefNum())
+	reference := uint16(getRefNum())
 	result := make([]*ShortMessage, 0, len(segments))
 	for i, segment := range segments {
 		partUDH := make(UDH, len(udh))
 		for j, ie := range udh {
 			partUDH[j] = InfoElement{ID: ie.ID, Data: append([]byte(nil), ie.Data...)}
 		}
-		partUDH[0] = NewIEConcatMessage(byte(len(segments)), byte(i+1), reference)
+		partUDH[0] = NewIEConcatMessage(byte(len(segments)), byte(i+1), byte(reference))
+		if wideReference {
+			partUDH[0] = NewIEConcatMessage16Bit(byte(len(segments)), byte(i+1), reference)
+		}
 		part := &ShortMessage{enc: encoding, SmDefaultMsgID: c.SmDefaultMsgID, messageData: segment, udHeader: partUDH}
 		if len(segmentText) > 0 {
 			part.message = segmentText[i]
@@ -482,11 +548,8 @@ func getRefNum() uint32 {
 // FromDataCoding resolves TS 23.038 §4 alphabet bits. An explicitly supplied
 // custom codec, particularly SMSC-default coding 0, retains its own alphabet.
 func unpackedGSMAlphabet(enc data.Encoding) bool {
-	if custom, ok := enc.(*data.CustomEncoding); ok {
-		base, ok := custom.BaseEncoding().(data.Encoding)
-		return ok && unpackedGSMAlphabet(base)
-	}
-	return enc == nil || enc == data.GSM7BIT
+	opts, gsm := gsm7Options(enc)
+	return gsm && !opts.Packed
 }
 
 func binaryAlphabet(enc data.Encoding) bool {
@@ -497,27 +560,19 @@ func binaryAlphabet(enc data.Encoding) bool {
 	return enc == data.BINARY8BIT1 || enc == data.BINARY8BIT2
 }
 
-// Avoid a real terminal @/CR in the position the no-count decoder treats as
-// padding. Segment boundaries may move by a septet while respecting ESC pairs.
-func splitPackedSeptets(septets []byte, limit, fill int) ([][]byte, error) {
+// Keep ESC pairs together and avoid tails whose inferred CR decoding changes
+// their septets (TS 23.038 §§6.1.2.3.1, 6.2.1.1). go-sms owns padding policy.
+func splitPackedSeptets(septets []byte, limit, headerLength int) ([][]byte, error) {
+	fill := packedFillBits(headerLength)
 	unambiguous := func(src []byte) bool {
-		n := len(src)
-		if n == 0 {
-			return true
-		}
-		// The second CR rule collides with literal CRCR after an octet
-		// boundary (TS 23.038 §6.1.2.3.1); move this tail to another part.
-		if n > 1 && src[n-1] == 0x0d && src[n-2] == 0x0d && (fill+(n-1)*7)%8 == 0 {
-			return false
-		}
-		bits := (fill+7*n+7)/8*8 - fill
-		return bits != 7*n || bits%7 != 0 || (src[n-1] != 0 && src[n-1] != 0x0d)
+		packed, err := gsm7.Pack7BitCR(src, fill)
+		return err == nil && len(packed) <= data.SM_GSM_MSG_LEN-headerLength && bytes.Equal(gsm7.Unpack7BitCR(packed, fill), src)
 	}
 	var parts [][]byte
 	for start := 0; start < len(septets); {
 		end := min(start+limit, len(septets))
 		for end > start {
-			if septets[end-1] != 0x1b && unambiguous(septets[start:end]) && (len(septets)-end > limit || unambiguous(septets[end:])) {
+			if !endsWithGSMEscape(septets[start:end]) && unambiguous(septets[start:end]) && (len(septets)-end > limit || unambiguous(septets[end:])) {
 				break
 			}
 			end--
@@ -532,16 +587,7 @@ func splitPackedSeptets(septets []byte, limit, fill int) ([][]byte, error) {
 }
 
 func packedCountAmbiguous(src []byte, fill int) bool {
-	count := (len(src)*8 - fill) / 7
-	if count < 0 {
-		return false
-	}
-	exact, err := data.DecodeGSM7Packed(src, uint8(fill), count)
-	if err != nil {
-		return false
-	}
-	inferred, err := data.DecodeGSM7Packed(src, uint8(fill), -1)
-	return err == nil && exact != inferred
+	return !bytes.Equal(gsm7.Unpack7Bit(src, fill), gsm7.Unpack7BitCR(src, fill))
 }
 
 func (c *ShortMessage) validateUDHI(udhi bool) error {
@@ -563,11 +609,8 @@ func (c *ShortMessage) validateUDHI(udhi bool) error {
 }
 
 func packedGSMAlphabet(enc data.Encoding) bool {
-	if custom, ok := enc.(*data.CustomEncoding); ok {
-		base, ok := custom.BaseEncoding().(data.Encoding)
-		return ok && packedGSMAlphabet(base)
-	}
-	return enc == data.GSM7BITPACKED
+	opts, gsm := gsm7Options(enc)
+	return gsm && opts.Packed
 }
 
 func supportsTextSegmentation(codec data.EncDec) bool {

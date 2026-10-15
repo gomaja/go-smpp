@@ -90,17 +90,10 @@ func FuzzGSM7RoundTrip(f *testing.F) {
 		}
 		for _, packed := range []bool{false, true} {
 			expectedText := text
-			if packed && len(septets) > 0 && len(septets)%8 == 0 && septets[len(septets)-1] == 0 {
-				// A literal eighth @ is indistinguishable from legacy zero
-				// padding. Test that wire collision separately; all other
-				// unambiguous texts must decode to the exact source text.
-				expectedText = text[:len(text)-1]
-			}
-			if packed && len(septets)%8 == 1 && len(septets) > 1 &&
-				septets[len(septets)-2] == 0x0d && septets[len(septets)-1] == 0x0d {
-				// Two literal CRs straddling an octet boundary have the same
-				// wire bytes as one CR with the mandatory duplicated padding.
-				expectedText = text[:len(text)-1]
+			if packed && len(septets) > 0 && len(septets)%8 == 0 && septets[len(septets)-1] == 0x0d {
+				// Pack7BitCR doubles a CR ending on an octet boundary, and
+				// Unpack7BitCR retains both. Exact counts still recover text.
+				expectedText += "\r"
 			}
 			encoding := GSM7BIT
 			if packed {
@@ -156,12 +149,13 @@ func TestGSM7PackedPaddingRoundTrip(t *testing.T) {
 	}
 }
 
-func TestGSM7PackedLegacyZeroPadding(t *testing.T) {
+func TestGSM7PackedZeroSpareRetained(t *testing.T) {
 	// Seven ASCII GSM septets packed independently with zero padding. The
-	// last octet's bit zero belongs to G; the seven upper bits are padding.
+	// last octet's bit zero belongs to G. CR inference retains the seven
+	// zero spare bits as @; an explicit septet count can exclude that value.
 	raw := []byte{0x61, 0xf1, 0x98, 0x5c, 0x36, 0x1f, 0x01}
 	got, err := GSM7BITPACKED.Decode(raw)
-	if err != nil || got != "abcdefG" {
+	if err != nil || got != "abcdefG@" {
 		t.Fatalf("decoded %x as %q, err=%v", raw, got, err)
 	}
 }
@@ -255,10 +249,10 @@ func TestGSM7PackedTerminalPaddingAmbiguity(t *testing.T) {
 			inferred string
 			count    int
 		}{
-			{withAt, prefix, prefix, count - 1},
-			{withAt, prefix + "@", prefix, count},
-			{oneCR, prefix + "\r", prefix + "\r", count},
-			{twoCR, prefix + "\r\r", prefix + "\r", count + 1},
+			{withAt, prefix, prefix + "@", count - 1},
+			{withAt, prefix + "@", prefix + "@", count},
+			{oneCR, prefix + "\r", prefix + "\r\r", count},
+			{twoCR, prefix + "\r\r", prefix + "\r\r", count + 1},
 		} {
 			inferred, err := GSM7BITPACKED.Decode(tc.raw)
 			if err != nil || inferred != tc.inferred {

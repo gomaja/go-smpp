@@ -427,6 +427,115 @@ goroutine or application-owned queue and return. That goroutine can call
 submission with a type assertion to `interface { SubmitContext(context.Context,
 pdu.PDU) error }`. Always check the return value.
 
+### Sending national-language text
+
+Choose tables explicitly with `data.NewGSM7`; no language detection or
+best-table search runs. `LockingShift` replaces the main alphabet and
+`SingleShift` replaces the extension table, independently (TS 23.038
+§6.2.1.2 and Annex A). The integer identifiers are available as constants in
+`github.com/gomaja/go-sms/encoding/gsm7/charset`.
+
+This example selects Turkish locking and Spanish single shift, so `ıÁ` is
+representable. Pass `Packed: true` only when the SMSC expects packed GSM7.
+
+```go
+package example
+
+import (
+	gosmpp "github.com/gomaja/go-smpp"
+	"github.com/gomaja/go-smpp/data"
+	"github.com/gomaja/go-smpp/pdu"
+	"github.com/gomaja/go-sms/encoding/gsm7/charset"
+)
+
+func sendNationalText(session *gosmpp.Session, source, destination pdu.Address, text string) error {
+	codec, err := data.NewGSM7(data.GSM7Options{
+		Packed:       false,
+		LockingShift: charset.Turkish,
+		SingleShift:  charset.Spanish,
+	})
+	if err != nil {
+		return err
+	}
+	message := pdu.NewSubmitSM().(*pdu.SubmitSM)
+	message.SourceAddr, message.DestAddr = source, destination
+	if err := message.Message.SetLongMessageWithEnc(text, codec); err != nil {
+		return err
+	}
+	parts, err := message.Split()
+	if err != nil {
+		return err
+	}
+	for _, part := range parts {
+		if err := session.Transceiver().Submit(part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+```
+
+For a message that fits the construction limit, use
+`Message.SetMessageWithEncoding(text, codec)` directly. Both text setters add
+single-shift IE `0x24` and locking-shift IE `0x25` for the selected nonzero
+identifiers, retaining caller-supplied IEs. Existing matching NLI IEs are kept;
+a conflicting or malformed manual NLI IE makes the setter fail without
+replacing the message. The submit_sm, deliver_sm and submit_multi marshalers
+set wire UDHI when NLI IEs are present (TS 23.040 §§9.2.3.24.15–16).
+
+Selector zero means the default table and omits that IE. NLI identifiers 1–13
+provide thirteen single-shift tables and twelve locking-shift tables; Spanish
+has no locking table. The constructor rejects Spanish locking and unknown or
+reserved selectors. For manual header construction,
+`pdu.NewIENationalLanguageSingleShift(int)` and
+`pdu.NewIENationalLanguageLockingShift(int)` return `(pdu.InfoElement, error)`;
+these reject zero because it is a reserved wire NLI (TS 23.038
+§§6.2.1.2.4–5, Annex A).
+
+Use PDU splitting for national-language messages: it budgets the complete UDH,
+including caller IEs, NLI IEs and concatenation metadata. If a 16-bit
+concatenation IE was supplied with `SetUDH`, splitting retains that reference
+width while generating the new reference, count and part numbers (TS 23.040
+§§9.2.3.24.1, 9.2.3.24.8). Direct packed `codec.(data.Splitter).EncodeSplit`
+retains the legacy one-fill-bit convention for a six-octet concatenation
+header; it does not infer the layout of an NLI header.
+
+### Receiving national-language text
+
+For received GSM7, `delivery.Message.GetMessage()` applies each segment's NLI
+IEs through go-sms `tpdu.DecodeUserData` with `tpdu.WithAllCharsets`. There is no
+need to pick a receive language or carry a previous part's table forward.
+Each missing IE selects its corresponding default table for that segment.
+Repeated IEs use the last applicable occurrence; a later reserved or
+unsupported identifier is ignored and does not reset an earlier applicable
+selection. Received Spanish locking selects the default main alphabet
+(TS 23.038 §§6.2.1.2.4–5; TS 23.040 §§9.2.3.24.15–16).
+
+SMPP has no packed/unpacked flag. If the peer sends packed GSM7, select that
+representation explicitly; NLI selection still comes from the received UDH:
+
+```go
+package example
+
+import (
+	"github.com/gomaja/go-smpp/data"
+	"github.com/gomaja/go-smpp/pdu"
+)
+
+func receiveText(delivery *pdu.DeliverSM, packed bool) (string, error) {
+	if packed {
+		return delivery.Message.GetMessageWithEncoding(data.GSM7BITPACKED)
+	}
+	return delivery.Message.GetMessage()
+}
+```
+
+Non-GSM codecs, including UCS2, ignore NLI IEs when decoding. `Message.UDH()`
+retains the original parsed IEs, including ignored selectors; `IgnoredUDH()`
+exposes a bounded header ignored because its final IE was truncated. Decoding
+does not rewrite those headers. SMPP `data_coding` keeps its own namespace
+(v3.4 §5.2.19); an NLI does not change that wire byte.
+
 ### TLS
 
 Supply a context-aware TLS dialer through `DialerFunc`, for example:
@@ -686,20 +795,24 @@ binds; older peers do not receive that TLV.
 Use `SetLongMessageWithEnc` followed by `SubmitSM.Split`, or
 `NewLongMessageWithEncoding` for message parts. Submit each resulting PDU.
 Splitting assigns independent sequence numbers, preserves unrelated TLVs,
-replaces UDH concatenation metadata and drops stale SAR TLVs (TS 23.040
-§9.2.3.24). `ShortMessage.IgnoredUDH` exposes a preserved header whose truncated
+replaces UDH concatenation metadata while retaining its 8-bit or 16-bit
+reference width, and drops stale SAR TLVs (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). `ShortMessage.IgnoredUDH` exposes a preserved header whose truncated
 final IE prevents parsing; its declared bytes are skipped before the payload.
 `data.CustomEncoding.BaseEncoding` exposes the underlying codec; `ShouldSplit`
 and `EncodeSplit` delegate to its splitter when available. GSM text uses
-escape-safe 160/153-septet budgets; `data.UCS2` counts encoded UTF-16 octets,
-including surrogate pairs, and `data.UCS2Strict` counts two octets per BMP
-character. UDH consumes each part's payload budget.
+escape-safe septet budgets reduced by the complete header; 160/153 applies to
+no UDH or an 8-bit concatenation IE alone. NLI and other caller IEs consume
+additional space. `data.UCS2` counts encoded UTF-16 octets, including surrogate
+pairs, and `data.UCS2Strict` counts two octets per BMP character. Construction
+also checks SMPP's octet-length field (v3.4 §§5.2.21–22).
 
 ### data_coding
 
 `data.SMSCDefaultCoding` is `0x00`; `GSM7BITCoding` is its compatibility alias.
 The local default remains GSM7; a peer with another SMSC-default alphabet needs
-a custom codec. Default-alphabet and extension-table conversion uses
+a custom codec. [Explicit national-language tables](#sending-national-language-text)
+use `data.NewGSM7(data.GSM7Options{...})` with the same wire coding.
+Default-alphabet and extension-table conversion uses
 `github.com/gomaja/go-sms/encoding/gsm7` (TS 23.038 §§6.2.1–6.2.1.1).
 `data.GSM7BIT.Decode` follows its permissive receiver policy: an unassigned
 extension falls back to the main table, a repeated or trailing ESC displays a
@@ -736,18 +849,35 @@ limitations](docs/spec-compliance.md#known-limitations).
 
 ### Packed GSM
 
-Use packed GSM only when the peer expects it. SMPP carries an octet length, not
-a septet count. The encoder uses the USSD CR-padding convention (TS 23.038
-§6.1.2.3.1); SMS zero padding is §6.1.2.1.1. Decoding supports both, but
-terminal `@` and CR can be ambiguous. Supply a count to `data.DecodeGSM7Packed`
-when available. Raw packed text is split only when it round-trips
-byte-identically, with original text also required for ambiguous tails. See
-[packed GSM conventions](docs/spec-compliance.md#packed-gsm-padding).
+Legacy packed PDU setters and `data.DecodeGSM7Packed` share the replaceable
+`data.GSM7BIT` alphabet, including through `CustomEncoding` wrappers.
+Standalone `data.GSM7BITPACKED.Encode` / `Decode` use the fixed default GSM
+tables. Sending with `data.NewGSM7` keeps its explicitly selected tables.
 
-Alphabet conversion uses go-sms; the existing local packed-bit handling,
-padding inference and split behavior remain until
-[go-sms #19](https://github.com/gomaja/go-sms/issues/19) supplies aligned CR
-packing. This change does not switch packed decoding to `Unpack7BitUSSD`.
+Use packed GSM only when the peer expects it. Built-in GSM alphabet conversion
+and all bit packing use go-sms, including UDH fill alignment and national-language
+tables.
+`gsm7.Pack7BitCR` supplies CR padding; `gsm7.Unpack7BitCR` supplies inferred
+receive decoding. SMPP carries an octet length rather than a septet count, so
+this borrows the USSD CR convention (TS 23.038 §6.1.2.3.1); SMS zero padding is
+specified separately in §6.1.2.1.1.
+
+Inferred decoding keeps a genuine final `@`, removes a final CR only when that
+septet ends exactly at the end of the octet payload, and retains doubled CRs. Zero-filled spare
+septets therefore appear as `@` in the default alphabet. This changes the earlier
+padding inference.
+Use `data.DecodeGSM7Packed(payload, fillBits, septetCount)` when the exact count
+is known; `-1` selects CR inference. For raw septets, use go-sms's
+`gsm7.Unpack7Bit` and slice to the known count, or `gsm7.Unpack7BitCR` for CR
+inference. Getters can retain exact original text when its encoding still
+matches the stored bytes and all configured NLI selectors are present in the
+current UDH.
+
+Received NLI messages retain their original septets and IEs when split;
+ambiguous raw CR tails still require retained original text. Other raw packed
+text must also round-trip byte-identically before splitting. Segmentation
+budgets and escape-pair boundaries remain in go-smpp. See
+[packed GSM conventions](docs/spec-compliance.md#packed-gsm-padding).
 
 ## Breaking changes on main
 
@@ -766,8 +896,13 @@ implementations as follows. The contracts above describe the resulting behavior.
 | `pdu.PDU` requires six additional methods. | Custom implementations must add `AppendOptionalParam`, `ClearOptionalParameters`, `GetOptionalParam`, `GetOptionalParameters`, `GetOptionalParams` and `SetCommandStatus`. |
 | `data.SMPP_V33` changes from `-0x33` to `0x33`; `OPT_PAR_MSG_WAIT` from `0x0002` to `0x0030`; `OPT_PAR_QOS_TIME_TO_LIVE_MIN` from `1` to `4`. | Use the named constants and update literal comparisons or lengths to the corrected values. |
 | Outside `0x00`–`0x0f`, `FromDataCoding` delegates TP-DCS classification, including reserved bits, to go-sms. | Keep SMPP direct values separate from TP-DCS. `0xe4`–`0xe7` / `0xec`–`0xef` now select UCS2; `0xfc`–`0xff` now select binary. Reserved codings fall back to GSM and defined compressed alphabets remain binary. |
+| GSM7 text setters reject caller-supplied NLI IEs that conflict with the selected tables. | Select tables with `NewGSM7` and matching NLI IEs; rebuild the message when changing a previously selected table. |
+| GSM7 `ShortMessage.GetMessage` now honors received NLI IEs. | Decode each part using its own UDH; select packed representation explicitly for peers that use it. |
+| Multipart packed segmentation may end a segment on a zero septet, changing part counts and segment bytes. | Recalculate multipart estimates and wire expectations: 300 `@` with caller UDH `02 70 00` now splits into 150/150 septets rather than 149/149/2. Single-message encodings are unchanged; boundaries follow the CR receive rule (TS 23.038 §6.1.2.3.1). |
+| Splitting retains a caller-selected 16-bit concatenation reference width. | Account for the complete header size; generated references, counts and part numbers still replace the old values. |
 | `data.GSM7(packed bool)` and its public x/text streaming adapter are removed. | Use `data.GSM7BIT` / `data.GSM7BITPACKED` for complete SMPP messages, or `gsm7.Encode` / `gsm7.Decode` for unpacked septets. Buffer complete messages instead of relying on the removed streaming transformer. x/text remains for the non-GSM codecs. |
 | `ValidateGSM7String`, `ValidateGSM7Buffer`, `GetEscapeChars` and `IsEscapeChar` are removed. | Encode with `gsm7.Encode` and inspect its typed error; derive septet costs from the encoded bytes. For stricter receive diagnostics use `gsm7.Strict`, which also rejects unassigned-extension fallback and is not equivalent to the old buffer validator. |
+| Packed inferred decoding follows go-sms's CR rule: final `@` and doubled CRs are retained; zero-filled spare septets are no longer stripped. A whole final CR septet is removed even after ESC. | Pass an explicit septet count to `data.DecodeGSM7Packed` to preserve exact content; `-1` uses CR inference (TS 23.038 §6.1.2.3.1). |
 | `GetSeptetCount` on the packed codec's concrete type is removed. | Use the length of `gsm7.Encode` output to count septets before packing; extension characters consume two. |
 | `data.ErrInvalidCharacter` and `data.ErrInvalidByte` are removed. | GSM encoding returns `gsm7.ErrUnencodable` or `gsm7.ErrInvalidUTF8`; inspect them with `errors.As`. Unpacked decoding now follows the permissive policy above. Invalid packed fill/count arguments return ordinary descriptive errors. |
 | `data.UCS2` uses go-sms's UTF-16 codec; `data.UCS2Strict` adds strict UCS2 encoding with the same wire value `0x08`. | Keep `UCS2` for supplementary-character interoperability or explicitly select `UCS2Strict`; handle `ucs2.ErrUnencodable` for supplementary characters in strict mode. |

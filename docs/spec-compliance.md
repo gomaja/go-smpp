@@ -845,8 +845,11 @@ effective default before selecting NLI IEs. Raw setters retain nil in
 `GetMessageWithEncoding(nil)` uses the effective default without changing the
 stored encoding. `Split()` resolves nil on every returned message to the
 effective codec, retaining its data_coding as before.
-Thus an ASCII default gives split results coding 1. A single part resolves the
-source in place; multipart splitting leaves the source encoding unchanged.
+Thus an ASCII default gives split results coding 1. A message that fits resolves
+the source in place. A rebuilt result leaves the source unchanged, including
+one part produced by replacing several staged concatenation IEs;
+`SubmitSM.Split` gives it a new PDU with a fresh sequence number, UDHI set and
+SAR TLVs removed (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8).
 These corrections are listed in
 the [behavior-change table](../README.md#pdus-and-encoding).
 

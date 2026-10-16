@@ -64,8 +64,11 @@ func (c *SubmitSM) GetResponse() PDU {
 // If the message is short enough and doesn't need splitting,
 // Split() returns an array of length 1
 // Returned messages resolve a nil encoding to data.DefaultGSM7(), including
-// its data_coding. A single part updates the source message in place;
-// a multipart result leaves the source encoding unchanged.
+// its data_coding. A fitting message returns the source PDU and resolves its
+// encoding in place. Rebuilt messages leave the source unchanged and receive
+// new PDUs with fresh sequence numbers, UDHI set and SAR TLVs removed, even
+// when replacing staged concatenation IEs produces only one part
+// (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8).
 func (c *SubmitSM) Split() (multiSubSM []*SubmitSM, err error) {
 	multiSubSM = []*SubmitSM{}
 
@@ -73,7 +76,7 @@ func (c *SubmitSM) Split() (multiSubSM []*SubmitSM, err error) {
 	if err != nil {
 		return
 	}
-	if len(multiMsg) == 1 {
+	if len(multiMsg) == 1 && multiMsg[0] == &c.Message {
 		return []*SubmitSM{c}, nil
 	}
 

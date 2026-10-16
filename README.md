@@ -986,8 +986,11 @@ default codec advertises another coding. `GetMessageWithEncoding(nil)` decodes
 using the effective default without changing the stored encoding.
 `Split()` resolves nil on every returned part, including an unchanged single
 part, and retains the effective codec's data_coding. For example, an ASCII
-default gives split results coding 1. A single part updates the source in
-place; a multipart result leaves the source encoding unchanged.
+default gives split results coding 1. A message that fits updates the source in
+place. A rebuilt result leaves the source unchanged, even when replacing
+several staged concatenation IEs produces one part; `SubmitSM.Split` returns
+a new PDU with a fresh sequence number, UDHI set and SAR TLVs removed
+(TS 23.040 §§9.2.3.24.1, 9.2.3.24.8).
 
 Standalone `data.GSM7BITPACKED.Encode` / `Decode` use the fixed default GSM
 tables. Sending with `data.NewGSM7` keeps its explicitly selected tables.
@@ -1048,6 +1051,7 @@ implementations as follows. The contracts above describe the resulting behavior.
 | Legacy packed PDU construction inherits the configured replacement's NLI tables; explicitly configured packed codecs keep their own alphabet during decoding and splitting. | Selected NLI IEs accompany every outgoing part. Received NLI IEs take precedence; a configured national-language codec without received NLI IEs uses the default tables (TS 23.038 §§6.2.1.2.4–5; TS 23.040 §§9.2.3.24.15–16). A custom unpacked alphabet need not implement `Splitter` when used by the legacy packed PDU path. Nil text encoding arguments resolve the effective default before table selection. Raw setters retain nil and marshal coding 0 until `Split()` resolves the returned messages' encodings. |
 | Multipart packed segmentation may end a segment on a zero septet, changing part counts and segment bytes. | Recalculate multipart estimates and wire expectations: 300 `@` with caller UDH `02 70 00` now splits into 150/150 septets rather than 149/149/2. Single-message encodings are unchanged; boundaries follow the CR receive rule (TS 23.038 §6.1.2.3.1). |
 | Splitting retains a caller-selected 16-bit concatenation reference width. | Account for the complete header size; generated references, counts and part numbers still replace the old values. |
+| `SubmitSM.Split` now returns a new PDU when replacing several staged concatenation IEs rebuilds a message into one part, instead of returning the unsplit source. | Use the returned PDU; it contains the rebuilt UDH, a fresh sequence number and UDHI, with SAR TLVs removed (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). |
 | `data.GSM7(packed bool)` and its public x/text streaming adapter are removed. | Use `data.GSM7BIT` / `data.GSM7BITPACKED` for complete SMPP messages, or `gsm7.Encode` / `gsm7.Decode` for unpacked septets. Buffer complete messages instead of relying on the removed streaming transformer. x/text remains for the non-GSM codecs. |
 | `ValidateGSM7String`, `ValidateGSM7Buffer`, `GetEscapeChars` and `IsEscapeChar` are removed. | Encode with `gsm7.Encode` and inspect its typed error; derive septet costs from the encoded bytes. For stricter receive diagnostics use `gsm7.Strict`, which also rejects unassigned-extension fallback and is not equivalent to the old buffer validator. |
 | Packed inferred decoding follows go-sms's CR rule: final `@` and doubled CRs are retained; zero-filled spare septets are no longer stripped. A whole final CR septet is removed even after ESC. | Pass an explicit septet count to `data.DecodeGSM7Packed` to preserve exact content; `-1` uses CR inference (TS 23.038 §6.1.2.3.1). |

@@ -710,8 +710,11 @@ length, zero total or sequence, or sequence greater than total (TS 23.040
 16-bit IE (§9.2.3.24). An invalid final IE no longer hides an earlier valid
 one. An 8-bit reference is returned as that octet in `mref`; a 16-bit reference
 uses the full `uint16`. With no valid IE, all values are zero and `found=false`.
-The receive examples use the same result, including its reference width, for
-reassembly. Splitting still strips all caller concatenation IEs before
+A caller that needs the values of an ignored IE decodes it with go-sms's
+`tpdu.InformationElement.ConcatInfo`, which does not check their ranges;
+`tpdu.ConcatInfo.Valid` applies the rules above. The receive examples use the
+same result, including its reference width, for reassembly, and apply `Valid`
+to SAR TLVs, which carry a 16-bit reference (SMPP v3.4 §§5.3.2.22–24). Splitting still strips all caller concatenation IEs before
 creating new metadata; it does not interpret them as received information.
 
 ### Splitting budgets

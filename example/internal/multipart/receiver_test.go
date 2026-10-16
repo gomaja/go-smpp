@@ -167,6 +167,29 @@ func TestIncompleteSARAndLastUDH(t *testing.T) {
 	}
 }
 
+func TestSARUsesSixteenBitReference(t *testing.T) {
+	// sar_msg_ref_num has two octets (SMPP v3.4 §5.3.2.22): a reference above
+	// 255 is kept, and a SAR part never joins an 8-bit UDH message.
+	var receiver Receiver
+	eight := part(t, "eight", 2, 1, 7, false)
+	if err := eight.Message.SetUDH(pdu.UDH{pdu.NewIEConcatMessage(2, 1, 7)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ready, err := receiver.Add(eight); err != nil || ready {
+		t.Fatalf("8-bit first part = %t, %v", ready, err)
+	}
+	if _, ready, err := receiver.Add(part(t, "sar", 2, 2, 7, true)); err != nil || ready {
+		t.Fatalf("SAR part completed an 8-bit message: %t, %v", ready, err)
+	}
+	if _, ready, err := receiver.Add(part(t, "A", 2, 1, 0x1234, true)); err != nil || ready {
+		t.Fatalf("first SAR part = %t, %v", ready, err)
+	}
+	text, ready, err := receiver.Add(part(t, "B", 2, 2, 0x1234, true))
+	if err != nil || !ready || text != "AB" {
+		t.Fatalf("SAR completion = %q, %t, %v", text, ready, err)
+	}
+}
+
 func TestReferenceWidthsAreIndependent(t *testing.T) {
 	var receiver Receiver
 	first := part(t, "eight-", 2, 1, 7, false)

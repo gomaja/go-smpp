@@ -370,13 +370,25 @@ func TestLongMessageDataShortSetterEquivalence(t *testing.T) {
 }
 
 func TestLongMessageDataTextEquivalence(t *testing.T) {
-	for name, enc := range map[string]data.Encoding{
-		"nil": nil, "gsm7": data.GSM7BIT, "packed": data.GSM7BITPACKED,
-		"ucs2": data.UCS2, "ascii": data.ASCII, "latin1": data.LATIN1,
-		"custom": data.NewCustomEncoding(0x10, data.ASCII),
+	// TS 23.038 §§6.1.2.1, 6.2.1: A is septet 0x41. With a six-octet
+	// concatenation UDH, packing starts with one fill bit: the first A is
+	// 0x82, followed by nineteen groups of eight A's in seven octets.
+	packedFirst := append([]byte{0x82}, bytes.Repeat([]byte{0xc1, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x83}, 19)...)
+	for _, tc := range []struct {
+		name  string
+		enc   data.Encoding
+		first []byte
+	}{
+		{"nil", nil, bytes.Repeat([]byte{0x41}, 153)},
+		{"gsm7", data.GSM7BIT, bytes.Repeat([]byte{0x41}, 153)},
+		{"packed", data.GSM7BITPACKED, packedFirst},
+		{"ucs2", data.UCS2, bytes.Repeat([]byte{0, 0x41}, 67)},
+		{"ascii", data.ASCII, bytes.Repeat([]byte{0x41}, 134)},
+		{"latin1", data.LATIN1, bytes.Repeat([]byte{0x41}, 134)},
+		{"custom", data.NewCustomEncoding(0x10, data.ASCII), bytes.Repeat([]byte{0x41}, 134)},
 	} {
-		t.Run(name, func(t *testing.T) {
-			codec := enc
+		t.Run(tc.name, func(t *testing.T) {
+			codec := tc.enc
 			if codec == nil {
 				codec = data.DefaultGSM7()
 			}
@@ -386,21 +398,66 @@ func TestLongMessageDataTextEquivalence(t *testing.T) {
 			require.NoError(t, err)
 			require.Greater(t, len(input), 254)
 			var raw ShortMessage
-			require.NoError(t, raw.SetLongMessageDataWithEncoding(input, enc))
+			require.NoError(t, raw.SetLongMessageDataWithEncoding(input, tc.enc))
+			before := raw
 			got, err := raw.Split()
 			require.NoError(t, err)
-			want, err := NewLongMessageWithEncoding(text, enc)
+			require.Greater(t, len(got), 1)
+			require.Equal(t, before, raw, "multipart Split must not resolve the source encoding")
+			want, err := NewLongMessageWithEncoding(text, tc.enc)
 			require.NoError(t, err)
 			requireRawPartsEquivalent(t, want, got)
+			for _, parts := range [][]*ShortMessage{got, want} {
+				require.Equal(t, tc.first, parts[0].messageData)
+				var joined strings.Builder
+				for _, part := range parts {
+					// Decode a received field with its own UDH and no retained
+					// text, independently of both paths' shared splitter.
+					b := NewBuffer(nil)
+					require.NoError(t, part.Marshal(b))
+					var received ShortMessage
+					require.NoError(t, received.Unmarshal(NewBuffer(b.Bytes()), true))
+					decoded, err := received.GetMessageWithEncoding(codec)
+					require.NoError(t, err)
+					joined.WriteString(decoded)
+				}
+				require.Equal(t, text, joined.String())
+			}
 		})
+	}
+}
+
+func TestLongMessageDataMultipartNilEncoding(t *testing.T) {
+	var m ShortMessage
+	require.NoError(t, m.SetUDH(rawPortHeader()))
+	input := bytes.Repeat([]byte{0x41}, 400)
+	snapshot := bytes.Clone(input)
+	require.NoError(t, m.SetLongMessageDataWithEncoding(input, nil))
+	parts, err := m.Split()
+	require.NoError(t, err)
+	require.Len(t, parts, 3)
+	require.Nil(t, m.enc)
+	require.Equal(t, snapshot, m.messageData)
+	require.Equal(t, rawPortHeader(), m.UDH())
+	for _, part := range parts {
+		require.NotSame(t, &m, part)
+		require.Equal(t, data.DefaultGSM7(), part.enc)
 	}
 }
 
 func FuzzLongMessageDataSplit(f *testing.F) {
 	for _, size := range []int{0, 140, 141, 268, 269, 34170, 34171} {
 		for choice := byte(0); choice < 6; choice++ {
-			f.Add(bytes.Repeat([]byte{0x41}, size), choice, choice%4)
+			for header := byte(0); header < 7; header++ {
+				f.Add(bytes.Repeat([]byte{0x41}, size), choice, header)
+			}
 		}
+	}
+	f.Add(bytes.Repeat([]byte{0xff}, 161), byte(3), byte(0)) // ASCII round-trip failure
+	f.Add(append(bytes.Repeat([]byte{0x41}, 161), 0x1b), byte(5), byte(0))
+	f.Add(bytes.Repeat([]byte{0x1b, 0x14}, 4), byte(5), byte(4)) // two-septet character, one-septet capacity
+	for _, n := range []int{255 * 76, 255*76 + 1} {
+		f.Add(bytes.Repeat([]byte{0x1b, 0x14}, n), byte(5), byte(0))
 	}
 	f.Fuzz(func(t *testing.T, input []byte, encodingChoice, headerChoice byte) {
 		// Bound resource use while retaining the 255-segment overflow boundary.
@@ -408,37 +465,114 @@ func FuzzLongMessageDataSplit(f *testing.F) {
 			return
 		}
 		enc := []data.Encoding{data.BINARY8BIT1, data.BINARY8BIT2, nil, data.ASCII, data.LATIN1, data.GSM7BIT}[encodingChoice%6]
-		header := []UDH{nil, rawPortHeader(), {NewIEConcatMessage16Bit(9, 7, 0xbeef)}, {{ID: 0x70, Data: make([]byte, 132)}}}[headerChoice%4]
+		header := []UDH{
+			nil, rawPortHeader(), {NewIEConcatMessage16Bit(9, 7, 0xbeef)},
+			{{ID: 0x70, Data: make([]byte, 132)}},
+			{{ID: 0x70, Data: make([]byte, 131)}},
+			{NewIEConcatMessage16Bit(9, 7, 0xbeef), NewIEConcatMessage(8, 6, 0xaa)},
+			{NewIEConcatMessage(8, 6, 0xaa), NewIEConcatMessage16Bit(9, 7, 0xbeef)},
+		}[headerChoice%7]
+		// Independent complete-header arithmetic, including UDHL. Rebuilding
+		// keeps non-concatenation IEs and the last concatenation IE's width
+		// (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8).
+		originalOctets, otherOctets, concatOctets := 0, 0, 5
+		if len(header) > 0 {
+			originalOctets = 1
+		}
+		for _, ie := range header {
+			originalOctets += 2 + len(ie.Data)
+			switch ie.ID {
+			case 0:
+				concatOctets = 5
+			case 8:
+				concatOctets = 6
+			default:
+				otherOctets += 2 + len(ie.Data)
+			}
+		}
+		rebuiltOctets := 1 + concatOctets + otherOctets
+		gsm := encodingChoice%6 == 2 || encodingChoice%6 == 5
+		capacity := func(octets int) int {
+			if gsm {
+				return 160 - (octets*8+6)/7
+			}
+			return 140 - octets
+		}
 		var m ShortMessage
 		require.NoError(t, m.SetUDH(header))
 		require.NoError(t, m.SetLongMessageDataWithEncoding(input, enc))
 		parts, err := m.Split()
-		if err != nil {
-			// Existing splitter errors: header capacity, one-octet segment
-			// count, character capacity, or non-round-trippable raw text.
-			reason := err.Error()
-			require.True(t, err == smpperrors.ErrUDHTooLong ||
-				strings.Contains(reason, "maximum is 255") ||
-				strings.Contains(reason, "cannot fit a GSM character") ||
-				strings.Contains(reason, "cannot be resegmented without changing encoded content"), "unexpected error: %v", err)
+		if len(input) <= capacity(originalOctets) {
+			require.NoError(t, err)
+			require.Len(t, parts, 1)
+			require.Same(t, &m, parts[0])
+			require.Equal(t, input, parts[0].messageData)
+			require.Equal(t, header, parts[0].UDH())
+			return
+		}
+		limit := capacity(rebuiltOctets)
+		if limit <= 0 {
+			require.ErrorIs(t, err, smpperrors.ErrUDHTooLong)
 			require.Nil(t, parts)
 			return
 		}
-		require.NotEmpty(t, parts)
-		require.LessOrEqual(t, len(parts), 255)
-		var joined []byte
-		for _, part := range parts {
-			limit := 140
-			if encodingChoice%6 == 2 || encodingChoice%6 == 5 {
-				limit = 160 - (part.headerLength()*8+6)/7
-				require.LessOrEqual(t, len(part.messageData), limit)
-			} else {
-				require.LessOrEqual(t, part.headerLength()+len(part.messageData), limit)
+		if encodingChoice%6 >= 2 {
+			codec := enc
+			if codec == nil {
+				codec = data.DefaultGSM7()
 			}
+			text, decodeErr := codec.Decode(input)
+			if decodeErr != nil {
+				require.EqualError(t, err, decodeErr.Error())
+				require.Nil(t, parts)
+				return
+			}
+			roundTrip, encodeErr := codec.Encode(text)
+			if encodeErr != nil || !bytes.Equal(input, roundTrip) {
+				require.ErrorContains(t, err, "cannot be resegmented without changing encoded content")
+				require.Nil(t, parts)
+				return
+			}
+		}
+		// Count whole encoded characters without calling the splitter. GSM
+		// extensions occupy two septets and cannot cross a part boundary
+		// (TS 23.038 §6.2.1.1); all other fuzz choices occupy one octet.
+		var sizes []int
+		used := 0
+		for i := 0; i < len(input); {
+			width := 1
+			if gsm && input[i] == 0x1b {
+				width = 2
+			}
+			if width > limit {
+				require.ErrorContains(t, err, "cannot fit a GSM character")
+				require.Nil(t, parts)
+				return
+			}
+			if used+width > limit {
+				sizes = append(sizes, used)
+				used = 0
+			}
+			used += width
+			i += width
+		}
+		sizes = append(sizes, used)
+		if len(sizes) > 255 {
+			require.EqualError(t, err, fmt.Sprintf("message requires %d segments, maximum is 255", len(sizes)))
+			require.Nil(t, parts)
+			return
+		}
+		require.NoError(t, err)
+		require.Len(t, parts, len(sizes))
+		var joined []byte
+		for i, part := range parts {
+			require.NotSame(t, &m, part)
+			require.Len(t, part.messageData, sizes[i])
+			encodedHeader, err := part.UDH().MarshalBinary()
+			require.NoError(t, err)
+			require.Len(t, encodedHeader, rebuiltOctets)
 			joined = append(joined, part.messageData...)
 		}
-		if encodingChoice%6 < 2 {
-			require.True(t, bytes.Equal(input, joined))
-		}
+		require.True(t, bytes.Equal(input, joined))
 	})
 }

@@ -847,8 +847,11 @@ also checks SMPP's octet-length field (v3.4 §§5.2.21–22).
 For raw data, optionally stage a UDH with `SetUDH` first, then call
 `SetLongMessageDataWithEncoding` and `SubmitSM.Split` or `ShortMessage.Split`.
 The long setter retains the supplied bytes without copying and accepts any
-encoding; split before sending (SMPP v3.4 §§5.2.21–22). For example, 8-bit
-data with a 16-bit application port IE (TS 23.040 §9.2.3.24.4):
+encoding; split before sending (SMPP v3.4 §§5.2.21–22). When a message fits,
+`SubmitSM.Split` returns the source PDU and the marshalers set UDHI only for
+[NLI IEs](#sending-national-language-text), so set UDHI in `esm_class` when
+staging any other header; multipart parts set it (SMPP v3.4 §5.2.12). For
+example, 8-bit data with a 16-bit application port IE (TS 23.040 §9.2.3.24.4):
 
 ```go
 package main
@@ -909,8 +912,9 @@ Raw data that already fits retains its existing acceptance, including odd
 UCS2 within the unrounded octet budget. Multipart raw NLI GSM now rejects
 septets above `0x7f` rather than forwarding them (TS 23.038 §6.2.1).
 Dangling ESC, odd UCS2 and final high-surrogate errors remain unchanged when
-splitting is required. Returned raw segments remain independent of the
-caller's supplied buffer.
+splitting is required. Newly built multipart segments are independent of the
+caller's supplied buffer. A message that fits is returned as the source and
+keeps the raw setter's buffer alias; callers needing ownership clone the input.
 
 ### data_coding
 

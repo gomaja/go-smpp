@@ -2,6 +2,7 @@ package pdu
 
 import (
 	"bytes"
+	stderrors "errors"
 	"fmt"
 	"sync/atomic"
 
@@ -290,15 +291,15 @@ func packedFillBits(headerLength int) int {
 }
 
 func (c *ShortMessage) payloadLimit() int {
-	// Header-capacity arithmetic stays local pending https://github.com/gomaja/go-sms/issues/24.
 	enc := c.enc
 	if enc == nil {
 		enc = data.DefaultGSM7()
 	}
-	headerLength := c.headerLength()
-	if headerLength < 0 {
+	header, err := c.headerBytes()
+	if err != nil {
 		return -1
 	}
+	headerLength := len(header)
 	// A custom codec without segmentation defines its own representation.
 	// Construct one complete field within SMPP v3.4 §§5.2.21–22's 254 octets.
 	if _, ok := enc.(*data.CustomEncoding); ok && !binaryAlphabet(enc) {
@@ -306,10 +307,18 @@ func (c *ShortMessage) payloadLimit() int {
 			return data.SM_MSG_LEN - headerLength
 		}
 	}
+	alpha := tpdu.Alpha8Bit
 	if unpackedGSMAlphabet(enc) {
-		return 160 - (headerLength*8+6)/7
+		alpha = tpdu.Alpha7Bit
 	}
-	return data.SM_GSM_MSG_LEN - headerLength
+	// TS 23.040 §§9.2.3.16, 9.2.3.24: count the complete marshalled
+	// header. Keep the octet fit test for raw UCS2, including odd lengths;
+	// whole-character limits apply only when chunking becomes necessary.
+	limit, err := tpdu.UserDataCapacity(alpha, headerLength)
+	if err != nil {
+		return -1
+	}
+	return limit
 }
 
 // split splits one short message into multiple short messages with UDH according
@@ -318,7 +327,6 @@ func (c *ShortMessage) payloadLimit() int {
 // A message that fits its encoded budget is returned in place. Returned parts
 // resolve a nil encoding to data.DefaultGSM7(), retaining its data_coding.
 func (c *ShortMessage) split() ([]*ShortMessage, error) {
-	// Chunking stays local pending https://github.com/gomaja/go-sms/issues/25.
 	encoding := c.enc
 	if encoding == nil {
 		encoding = data.DefaultGSM7()
@@ -362,11 +370,12 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit = data.SM_GSM_MSG_LEN - len(header)
+	alpha := tpdu.Alpha8Bit
 	if unpackedGSMAlphabet(encoding) {
-		limit = 160 - (len(header)*8+6)/7
+		alpha = tpdu.Alpha7Bit
 	}
-	if limit <= 0 {
+	limit, err = tpdu.UserDataCapacity(alpha, len(header))
+	if err != nil || limit <= 0 {
 		return nil, errors.ErrUDHTooLong
 	}
 	var segments [][]byte
@@ -393,7 +402,10 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 			if err != nil {
 				return nil, err
 			}
-			limit = 160 - (len(header)*8+6)/7
+			limit, err = tpdu.UserDataCapacity(tpdu.Alpha7Bit, len(header))
+			if err != nil {
+				return nil, errors.ErrUDHTooLong
+			}
 			segments, err = splitPackedSeptets(septets, limit, len(header))
 			for i, part := range segments {
 				segments[i], err = gsm7.Pack7BitCR(part, packedFillBits(len(header)))
@@ -402,7 +414,17 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 				}
 			}
 		} else {
-			segments, err = splitGSMSeptets(septets, limit)
+			// Retain the dangling-ESC error before the raw splitter, which
+			// accepts a final introducer structurally (TS 23.038 §6.2.1.1).
+			if endsWithGSMEscape(septets) {
+				return nil, fmt.Errorf("split limit cannot fit a GSM character")
+			}
+			// Raw NLI data may belong to the caller. The chunks may share
+			// this copy, but must remain independent of the supplied buffer.
+			segments, err = tpdu.SplitUserData(bytes.Clone(septets), tpdu.Alpha7Bit, limit)
+			if stderrors.Is(err, tpdu.ErrOverlength) {
+				err = fmt.Errorf("split limit cannot fit a GSM character")
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -433,7 +455,10 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 			if err != nil {
 				return nil, err
 			}
-			limit = 160 - (len(header)*8+6)/7
+			limit, err = tpdu.UserDataCapacity(tpdu.Alpha7Bit, len(header))
+			if err != nil {
+				return nil, errors.ErrUDHTooLong
+			}
 			septets, encodeErr := alphabet.Encode(text)
 			if encodeErr != nil {
 				return nil, encodeErr
@@ -462,8 +487,10 @@ func (c *ShortMessage) split() ([]*ShortMessage, error) {
 		if !binaryAlphabet(encoding) {
 			return nil, fmt.Errorf("encoding 0x%02x does not support text segmentation", encoding.DataCoding())
 		}
-		for start := 0; start < len(payload); start += limit {
-			segments = append(segments, append([]byte(nil), payload[start:min(start+limit, len(payload))]...))
+		// SplitUserData shares its input; detach caller-supplied binary data.
+		segments, err = tpdu.SplitUserData(bytes.Clone(payload), tpdu.Alpha8Bit, limit)
+		if err != nil {
+			return nil, err
 		}
 	}
 	// TS 23.040 §9.2.3.24.1: count and part number are one octet, 1..255.
@@ -593,13 +620,18 @@ func binaryAlphabet(enc data.Encoding) bool {
 	return enc == data.BINARY8BIT1 || enc == data.BINARY8BIT2
 }
 
-// Keep ESC pairs together and avoid tails whose inferred CR decoding changes
-// their septets (TS 23.038 §§6.1.2.3.1, 6.2.1.1). go-sms owns padding policy.
+// SMPP carries no septet count, so TS 23.038 §6.1.2.3.1's CR rule decides
+// boundaries locally. Keep ESC pairs together and require inferred decoding
+// to preserve the original septets (§6.2.1.1). go-sms owns packing itself.
 func splitPackedSeptets(septets []byte, limit, headerLength int) ([][]byte, error) {
+	octetLimit, err := tpdu.UserDataCapacity(tpdu.Alpha8Bit, headerLength)
+	if err != nil {
+		return nil, errors.ErrUDHTooLong
+	}
 	fill := packedFillBits(headerLength)
 	unambiguous := func(src []byte) bool {
 		packed, err := gsm7.Pack7BitCR(src, fill)
-		return err == nil && len(packed) <= data.SM_GSM_MSG_LEN-headerLength && bytes.Equal(gsm7.Unpack7BitCR(packed, fill), src)
+		return err == nil && len(packed) <= octetLimit && bytes.Equal(gsm7.Unpack7BitCR(packed, fill), src)
 	}
 	var parts [][]byte
 	for start := 0; start < len(septets); {

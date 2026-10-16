@@ -153,22 +153,16 @@ func NewIEConcatMessage16Bit(totalParts, partNum byte, mref uint16) InfoElement 
 // expect src at least of length 2 with correct IE format:
 //
 //	[ ID_1, LENGTH_1, DATA_N ]
+//
+// Data is copied and is nil for an empty element. On error, the receiver is
+// unchanged and n is zero; errors follow UDH.UnmarshalBinary's go-sms policy.
 func (ie *InfoElement) UnmarshalBinary(src []byte) (int, error) {
-	// Standalone IE decoding stays local pending https://github.com/gomaja/go-sms/issues/26.
-	if len(src) < 2 {
-		return 0, fmt.Errorf("decode error InfoElement underflow, len = %d", len(src))
+	// TS 23.040 §9.2.3.24: go-sms owns standalone IE prefix decoding.
+	var element tpdu.InformationElement
+	n, err := element.UnmarshalBinary(src)
+	if err != nil {
+		return 0, err
 	}
-
-	// second byte is len
-	ieLen := int(src[1])
-
-	// check length, excluding first 2 bytes
-	if len(src)-2 < ieLen {
-		return 0, fmt.Errorf("decode error InfoElement underflow, expect length %d, got %d", ieLen, len(src))
-	}
-
-	ie.ID = src[0]               // first byte is ID
-	ie.Data = src[2:(ieLen + 2)] // 3rd byte onward is data
-
-	return 2 + ieLen, nil
+	*ie = InfoElement(element)
+	return n, nil
 }

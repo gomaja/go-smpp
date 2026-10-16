@@ -135,24 +135,6 @@ func unpackedGSMCodec(enc data.Encoding) (data.Encoding, error) {
 	return data.UnpackedGSM7(enc)
 }
 
-// GSM segmentation preserves the original septets and the segment's NLI IEs;
-// it does not need to choose tables again or re-encode received text.
-func splitGSMSeptets(septets []byte, limit int) ([][]byte, error) {
-	var parts [][]byte
-	for start := 0; start < len(septets); {
-		end := min(start+limit, len(septets))
-		if endsWithGSMEscape(septets[start:end]) {
-			end--
-		}
-		if end == start {
-			return nil, fmt.Errorf("split limit cannot fit a GSM character")
-		}
-		parts = append(parts, append([]byte(nil), septets[start:end]...))
-		start = end
-	}
-	return parts, nil
-}
-
 // ESC ESC is a complete pair too. Only an odd run of trailing escapes
 // leaves an introducer without its following septet (TS 23.040 9.2.3.24.1).
 func endsWithGSMEscape(septets []byte) bool {

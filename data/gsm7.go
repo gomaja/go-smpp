@@ -5,6 +5,7 @@ import (
 
 	"github.com/gomaja/go-sms/encoding/gsm7"
 	"github.com/gomaja/go-sms/encoding/gsm7/charset"
+	"github.com/gomaja/go-sms/encoding/tpdu"
 )
 
 // GSM7Options selects explicit GSM7 tables. LockingShift and SingleShift are
@@ -116,6 +117,13 @@ func (c *configuredGSM7) ShouldSplit(text string, octetLimit uint) bool {
 }
 
 func (c *configuredGSM7) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
+	if !c.options.Packed {
+		parts, err := encodeSplit(c, text, octetLimit, tpdu.Alpha7Bit)
+		if err == nil && parts == nil {
+			parts = [][]byte{}
+		}
+		return parts, err
+	}
 	if octetLimit == 0 {
 		return nil, fmt.Errorf("split limit must be positive")
 	}
@@ -124,12 +132,9 @@ func (c *configuredGSM7) EncodeSplit(text string, octetLimit uint) ([][]byte, er
 		return nil, err
 	}
 	parts := [][]byte{}
-	limit := int(min(octetLimit, uint(len(septets))))
-	if c.options.Packed {
-		// As with GSM7BITPACKED.EncodeSplit, one fill bit follows a six-octet
-		// concatenation UDH (TS 23.040 section 9.2.3.24).
-		limit = int((min(octetLimit, uint(len(septets)+1))*8 - 1) / 7)
-	}
+	// Retain the legacy one-fill-bit contract for a six-octet UDH;
+	// arbitrary complete-header packing belongs to the PDU path (TS 23.040 §9.2.3.24).
+	limit := int((min(octetLimit, uint(len(septets)+1))*8 - 1) / 7)
 	for start := 0; start < len(septets); {
 		end := min(start+limit, len(septets))
 		// TS 23.040 section 9.2.3.24.1 forbids splitting an escape sequence.
@@ -139,24 +144,21 @@ func (c *configuredGSM7) EncodeSplit(text string, octetLimit uint) ([][]byte, er
 		if end == start {
 			return nil, fmt.Errorf("split limit cannot fit a GSM character")
 		}
-		segment := septets[start:end:end]
-		if c.options.Packed {
-			segment, err = gsm7.Pack7BitCR(segment, 1)
+		segment, err := gsm7.Pack7BitCR(septets[start:end], 1)
+		if err != nil {
+			return nil, err
+		}
+		if uint(len(segment)) > octetLimit {
+			end--
+			if end > start && septets[end-1] == escapeSequence {
+				end--
+			}
+			if end == start {
+				return nil, fmt.Errorf("split limit cannot fit a padded GSM character")
+			}
+			segment, err = gsm7.Pack7BitCR(septets[start:end], 1)
 			if err != nil {
 				return nil, err
-			}
-			if uint(len(segment)) > octetLimit {
-				end--
-				if end > start && septets[end-1] == escapeSequence {
-					end--
-				}
-				if end == start {
-					return nil, fmt.Errorf("split limit cannot fit a padded GSM character")
-				}
-				segment, err = gsm7.Pack7BitCR(septets[start:end], 1)
-				if err != nil {
-					return nil, err
-				}
 			}
 		}
 		parts = append(parts, segment)

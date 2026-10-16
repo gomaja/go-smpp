@@ -280,7 +280,7 @@ func TestStandaloneInfoElementLengthDomain(t *testing.T) {
 		require.Len(t, ie.Data, size)
 		if size > 0 {
 			src[2] = 0x42
-			require.Equal(t, byte(0x42), ie.Data[0])
+			require.Equal(t, byte(0x41), ie.Data[0])
 		}
 	}
 }
@@ -306,13 +306,13 @@ func TestStandaloneInfoElementErrorsLeaveReceiverUnchanged(t *testing.T) {
 	}
 }
 
-func TestStandaloneInfoElementZeroLengthDataIsNonNil(t *testing.T) {
+func TestStandaloneInfoElementZeroLengthDataIsNil(t *testing.T) {
 	ie := InfoElement{ID: 0xff, Data: []byte{9}}
 	n, err := ie.UnmarshalBinary([]byte{0x70, 0})
 	require.NoError(t, err)
 	require.Equal(t, 2, n)
 	require.Equal(t, byte(0x70), ie.ID)
-	require.NotNil(t, ie.Data)
+	require.Nil(t, ie.Data)
 	require.Empty(t, ie.Data)
 }
 

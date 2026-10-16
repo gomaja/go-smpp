@@ -671,7 +671,7 @@ existing error.
 
 The [publication archive](https://www.3gpp.org/ftp/Specs/archive/23_series/23.040/)
 and [specification record](https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=747)
-were rechecked on **2026-10-15** for this delegation. Both still identify
+were rechecked on **2026-10-16** for this delegation. Both still identify
 V20.0.0 as current. The [correction register](https://portal.3gpp.org/ChangeRequests.aspx?specnumber=23.040&q=1)
 showed no newer approved correction to §9.2.3.24; proposals without approval
 were not applied.
@@ -682,9 +682,11 @@ zero bytes and leave the receiver unchanged. Malformed-final-IE errors now
 use a generic message because the dependency reports the whole header as
 ignored. Parsed IE data is go-sms's copy, independent of the source; a
 zero-length IE may have nil data. Standalone `InfoElement.UnmarshalBinary`
-still borrows its input and stays local pending
-[go-sms issue 26](https://github.com/gomaja/go-sms/issues/26), since a standalone
-IE can exceed the representable complete-header size.
+delegates to `tpdu.InformationElement.UnmarshalBinary` (TS 23.040 §9.2.3.24),
+including a full 255-octet IE body independently of complete-header limits.
+Its data is copied and is nil for zero length. Underflow returns go-sms's
+`DecodeError` wrapping `tpdu.ErrUnderflow`, with zero consumed bytes and an
+unchanged receiver; callers should inspect errors rather than old wording.
 
 SMPP coding, length and UDHI framing stay local (v3.4 §§5.2.19, 5.2.21–22).
 `ShortMessage` attempts header parsing only with UDHI set and a nonempty
@@ -714,11 +716,20 @@ creating new metadata; it does not interpret them as received information.
 
 ### Splitting budgets
 
-Header-capacity arithmetic stays local pending
-[go-sms issue 24](https://github.com/gomaja/go-sms/issues/24); chunking stays
-local pending [issue 25](https://github.com/gomaja/go-sms/issues/25). These
-field-level APIs avoid introducing TPDU envelope and segmentation policy into
-SMPP. Segmentation behavior is unchanged by complete-header delegation.
+`tpdu.UserDataCapacity` owns SMS capacity arithmetic using the actual complete
+marshalled header length, including UDHL, caller IEs, NLI and concatenation
+width (TS 23.040 §§9.2.3.16, 9.2.3.24). `tpdu.SplitUserData` owns ordinary
+already-encoded chunking: unpacked GSM (including received NLI septets),
+UCS2/UTF-16, ASCII, Latin-1, Cyrillic, Hebrew and binary octets. Text is encoded
+with the selected codec first, preserving conversion and strict-UCS2 errors;
+the octet alphabet selects only boundary arithmetic for single-octet codecs
+(TS 23.040 §§9.2.3.24.1, 9.2.3.24.8; TS 23.038 §§6.2.1.1, 6.2.3).
+
+The [23.038 archive](https://www.3gpp.org/ftp/Specs/archive/23_series/23.038/),
+[specification record](https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=745)
+and [correction register](https://portal.3gpp.org/ChangeRequests.aspx?q=1&specnumber=23.038)
+were also rechecked on **2026-10-16**: V20.0.0 remains current, with no newer
+approved correction affecting these clauses.
 
 GSM-alphabet encodings use escape-safe septet budgets. An unpacked GSM7 part
 holds `160 - ceil(headerOctets * 8 / 7)` septets; extension characters consume
@@ -733,6 +744,27 @@ returns false on an encoding error, including malformed UTF-8.
 `data.UCS2` uses encoded UTF-16 octets, preserving surrogate pairs;
 `data.UCS2Strict` uses two octets per BMP scalar. The wire coding remains
 `0x08` for both.
+
+An already-fitting raw UCS2 payload is tested against the unrounded octet
+capacity, preserving acceptance of an odd final byte. Chunking rounds down to
+whole 16-bit units and retains UTF-16 surrogate pairs. Existing raw decode
+and byte-identical re-encoding guards preserve errors for odd UCS2 and a
+final lone high surrogate. A dangling final GSM ESC keeps its existing error.
+Multipart received NLI data containing septets above `0x7f` now fails with
+go-sms's invalid-septet error instead of being forwarded (TS 23.038 §6.2.1);
+already-fitting raw data retains its prior acceptance. The chunks share an
+internally allocated encoded buffer with capacity limited to length; raw
+caller buffers are copied at the splitting boundary.
+
+Packed GSM boundary selection remains in go-smpp: SMPP carries no septet
+count, so the chosen CR receive convention must recover each original
+segment (TS 23.038 §6.1.2.3.1). The legacy packed `EncodeSplit` still assumes
+one fill bit; complete-header alignment, ambiguity and byte-identical
+re-encoding guards remain local. go-smpp also retains custom splitter
+dispatch through nested wrappers, rejection of text encodings without a
+character-aware splitter, concatenation width/position/count/reference
+allocation and all SMPP PDU assembly. Ordinary valid segmentation bytes are
+unchanged by this delegation.
 
 A caller-supplied custom codec without a splitter constructs at most 254 octets
 including UDH (SMPP v3.4 §§5.2.21–22); longer text returns an error. Parsed

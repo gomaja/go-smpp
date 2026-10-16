@@ -2,7 +2,6 @@ package data
 
 import (
 	"fmt"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/gomaja/go-sms/encoding/gsm7"
@@ -146,27 +145,11 @@ func (c *gsm7bit) ShouldSplit(text string, octetLimit uint) bool {
 }
 
 func (c *gsm7bit) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
-	if octetLimit == 0 {
-		return nil, fmt.Errorf("split limit must be positive")
+	parts, err := encodeSplit(c, text, octetLimit, tpdu.Alpha7Bit)
+	if err == nil && parts == nil {
+		parts = [][]byte{}
 	}
-	septets, err := c.Encode(text)
-	if err != nil {
-		return nil, err
-	}
-	parts := [][]byte{}
-	for start := 0; start < len(septets); {
-		end := start + int(min(octetLimit, uint(len(septets)-start)))
-		// TS 23.040 §9.2.3.24.1: keep an escape and its character together.
-		if septets[end-1] == escapeSequence {
-			end--
-		}
-		if end == start {
-			return nil, fmt.Errorf("split limit cannot fit a GSM character")
-		}
-		parts = append(parts, septets[start:end:end])
-		start = end
-	}
-	return parts, nil
+	return parts, err
 }
 
 type gsm7bitPacked struct{}
@@ -206,7 +189,8 @@ func (*gsm7bitPacked) EncodeSplit(text string, octetLimit uint) ([][]byte, error
 		return nil, err
 	}
 	parts := [][]byte{}
-	// One fill bit follows a six-octet UDH (TS 23.040 §9.2.3.24).
+	// Retain the legacy one-fill-bit contract for a six-octet UDH
+	// (TS 23.040 §9.2.3.24); this API has no complete header or septet count.
 	limit := int((min(octetLimit, uint(len(septets)+1))*8 - 1) / 7)
 	for start := 0; start < len(septets); {
 		end := min(start+limit, len(septets))
@@ -262,25 +246,7 @@ func (*ascii) ShouldSplit(text string, octetLimit uint) bool {
 }
 
 func (c *ascii) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
-	if octetLimit == 0 {
-		return nil, fmt.Errorf("split limit must be positive")
-	}
-	var segments [][]byte
-	limit := int(min(octetLimit, uint(len(text))))
-
-	for i := 0; i < len(text); {
-		end := min(i+limit, len(text))
-
-		segment, err := c.Encode(text[i:end])
-		if err != nil {
-			return nil, err
-		}
-
-		segments = append(segments, segment)
-		i = end
-	}
-
-	return segments, nil
+	return encodeSplit(c, text, octetLimit, tpdu.Alpha8Bit)
 }
 
 type iso88591 struct{}
@@ -301,35 +267,7 @@ func (c *iso88591) ShouldSplit(text string, octetLimit uint) bool {
 }
 
 func (c *iso88591) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
-	if octetLimit == 0 {
-		return nil, fmt.Errorf("split limit must be positive")
-	}
-	var segments [][]byte
-	runeSlice := []rune(text)
-	limit := int(min(octetLimit, uint(len(runeSlice))))
-
-	for i := 0; i < len(runeSlice); {
-		end := min(i+limit, len(runeSlice))
-
-		segment, err := c.Encode(string(runeSlice[i:end]))
-		if err != nil {
-			return nil, err
-		}
-
-		// If encoded segment exceeds limit, reduce character count
-		for len(segment) > limit && end > i+1 {
-			end--
-			segment, err = c.Encode(string(runeSlice[i:end]))
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		segments = append(segments, segment)
-		i = end
-	}
-
-	return segments, nil
+	return encodeSplit(c, text, octetLimit, tpdu.Alpha8Bit)
 }
 
 type binary8bit1 struct{}
@@ -386,35 +324,7 @@ func (c *iso88595) ShouldSplit(text string, octetLimit uint) bool {
 }
 
 func (c *iso88595) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
-	if octetLimit == 0 {
-		return nil, fmt.Errorf("split limit must be positive")
-	}
-	var segments [][]byte
-	runeSlice := []rune(text)
-	limit := int(min(octetLimit, uint(len(runeSlice))))
-
-	for i := 0; i < len(runeSlice); {
-		end := min(i+limit, len(runeSlice))
-
-		segment, err := c.Encode(string(runeSlice[i:end]))
-		if err != nil {
-			return nil, err
-		}
-
-		// If encoded segment exceeds limit, reduce character count
-		for len(segment) > limit && end > i+1 {
-			end--
-			segment, err = c.Encode(string(runeSlice[i:end]))
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		segments = append(segments, segment)
-		i = end
-	}
-
-	return segments, nil
+	return encodeSplit(c, text, octetLimit, tpdu.Alpha8Bit)
 }
 
 type iso88598 struct{}
@@ -435,35 +345,7 @@ func (c *iso88598) ShouldSplit(text string, octetLimit uint) bool {
 }
 
 func (c *iso88598) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
-	if octetLimit == 0 {
-		return nil, fmt.Errorf("split limit must be positive")
-	}
-	var segments [][]byte
-	runeSlice := []rune(text)
-	limit := int(min(octetLimit, uint(len(runeSlice))))
-
-	for i := 0; i < len(runeSlice); {
-		end := min(i+limit, len(runeSlice))
-
-		segment, err := c.Encode(string(runeSlice[i:end]))
-		if err != nil {
-			return nil, err
-		}
-
-		// If encoded segment exceeds limit, reduce character count
-		for len(segment) > limit && end > i+1 {
-			end--
-			segment, err = c.Encode(string(runeSlice[i:end]))
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		segments = append(segments, segment)
-		i = end
-	}
-
-	return segments, nil
+	return encodeSplit(c, text, octetLimit, tpdu.Alpha8Bit)
 }
 
 type ucs2 struct{ strict bool }
@@ -492,41 +374,8 @@ func (c *ucs2) ShouldSplit(text string, octetLimit uint) (shouldSplit bool) {
 	return err == nil && uint(len(encoded)) > octetLimit
 }
 
-func (c *ucs2) EncodeSplit(text string, octetLimit uint) (allSeg [][]byte, err error) {
-	if octetLimit == 0 {
-		return nil, fmt.Errorf("split limit must be positive")
-	}
-	if _, err := c.Encode(text); err != nil {
-		return nil, err
-	}
-	runes := []rune(text)
-	for from := 0; from < len(runes); {
-		to := from
-		octets := uint(0)
-		// TS 23.040 §9.2.3.24 budgets encoded octets. Keep both UTF-16
-		// code units of a supplementary character in the same segment.
-		for to < len(runes) {
-			cost := uint(2)
-			if utf16.RuneLen(runes[to]) == 2 {
-				cost = 4
-			}
-			if octets+cost > octetLimit {
-				break
-			}
-			octets += cost
-			to++
-		}
-		if to == from {
-			return nil, fmt.Errorf("split limit cannot fit a UTF-16 character")
-		}
-		segment, err := c.Encode(string(runes[from:to]))
-		if err != nil {
-			return nil, err
-		}
-		allSeg = append(allSeg, segment)
-		from = to
-	}
-	return allSeg, nil
+func (c *ucs2) EncodeSplit(text string, octetLimit uint) ([][]byte, error) {
+	return encodeSplit(c, text, octetLimit, tpdu.AlphaUCS2)
 }
 
 func (*ucs2) DataCoding() byte { return UCS2Coding }

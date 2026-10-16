@@ -801,8 +801,10 @@ when the body exceeds 255 octets. Empty headers are omitted on send.
 The public `UDH.UnmarshalBinary` facade requires at least one well-formed IE;
 an empty or ignored header returns an error without changing the receiver.
 Parsed IE data is copied by go-sms and does not alias the input. Zero-length
-IE data may be nil. Standalone `InfoElement.UnmarshalBinary` retains its
-local decoder and borrowed data pending [go-sms issue 26](https://github.com/gomaja/go-sms/issues/26).
+IE data may be nil. Standalone `InfoElement.UnmarshalBinary` delegates to
+`tpdu.InformationElement.UnmarshalBinary` under the same clause. Its data is
+also copied and is nil for a zero-length IE. Errors return zero consumed
+bytes, leave the receiver unchanged and use go-sms's typed decode errors.
 
 SMPP framing stays in go-smpp. With UDHI set and a nonempty message field,
 `ShortMessage` parses only the declared header span. It preserves `00` and
@@ -811,10 +813,12 @@ their declared span and exposes no parsed `UDH()`. A span beyond the message
 field remains an error. The result is committed only after framing succeeds,
 and preserved header bytes take precedence when forwarding the message.
 
-Header-capacity arithmetic and chunking remain local pending
-[go-sms issue 24](https://github.com/gomaja/go-sms/issues/24) and
-[issue 25](https://github.com/gomaja/go-sms/issues/25). These track field-level
-APIs that avoid introducing TPDU segmentation into SMPP framing.
+SMS capacity comes from `tpdu.UserDataCapacity` using the actual complete
+marshalled header, including UDHL, caller IEs, NLI and the selected
+concatenation width (TS 23.040 §§9.2.3.16, 9.2.3.24). Ordinary encoded chunks
+come from `tpdu.SplitUserData`: unpacked GSM septets, UCS2/UTF-16 and octet
+alphabets retain whole characters (TS 23.040 §§9.2.3.24.1, 9.2.3.24.8;
+TS 23.038 §§6.2.1.1, 6.2.3). The selected codec still converts text first.
 
 ### Long messages and splitting
 
@@ -831,6 +835,22 @@ no UDH or an 8-bit concatenation IE alone. NLI and other caller IEs consume
 additional space. `data.UCS2` counts encoded UTF-16 octets, including surrogate
 pairs, and `data.UCS2Strict` counts two octets per BMP character. Construction
 also checks SMPP's octet-length field (v3.4 §§5.2.21–22).
+
+go-smpp retains concatenation width, position, count and reference allocation,
+custom splitter dispatch (including nested wrappers), and SMPP PDU assembly.
+Unknown text encodings still need a character-aware splitter. Packed GSM's
+boundary search remains local because SMPP has no septet count: the CR rule
+from TS 23.038 §6.1.2.3.1 must preserve inferred text as well as fit the header.
+The legacy packed `EncodeSplit` keeps its one-fill-bit contract; raw ambiguity
+and byte-identical re-encoding guards also remain. Custom codecs without
+segmentation keep their local 254-octet SMPP field budget.
+
+Raw data that already fits retains its existing acceptance, including odd
+UCS2 within the unrounded octet budget. Multipart raw NLI GSM now rejects
+septets above `0x7f` rather than forwarding them (TS 23.038 §6.2.1).
+Dangling ESC, odd UCS2 and final high-surrogate errors remain unchanged when
+splitting is required. Returned raw segments remain independent of the
+caller's supplied buffer.
 
 ### data_coding
 
@@ -929,8 +949,9 @@ current UDH.
 
 Received NLI messages retain their original septets and IEs when split;
 ambiguous raw CR tails still require retained original text. Other raw packed
-text must also round-trip byte-identically before splitting. Segmentation
-budgets and escape-pair boundaries remain in go-smpp. See
+text must also round-trip byte-identically before splitting. go-sms supplies
+SMS budgets and ordinary escape-safe chunks; go-smpp retains the packed
+CR-sensitive boundary search. See
 [packed GSM conventions](docs/spec-compliance.md#packed-gsm-padding).
 
 ## Breaking changes on main
@@ -951,7 +972,8 @@ implementations as follows. The contracts above describe the resulting behavior.
 | `data.SMPP_V33` changes from `-0x33` to `0x33`; `OPT_PAR_MSG_WAIT` from `0x0002` to `0x0030`; `OPT_PAR_QOS_TIME_TO_LIVE_MIN` from `1` to `4`. | Use the named constants and update literal comparisons or lengths to the corrected values. |
 | Outside `0x00`–`0x0f`, `FromDataCoding` delegates TP-DCS classification, including reserved bits, to go-sms. | Keep SMPP direct values separate from TP-DCS. `0xe4`–`0xe7` / `0xec`–`0xef` now select UCS2; `0xfc`–`0xff` now select binary. Reserved codings fall back to GSM and defined compressed alphabets remain binary. |
 | `UDH.GetConcatInfo` ignores invalid concatenation IEs and returns the last applicable valid IE. | A wrong-length IE, zero total or sequence, or sequence greater than total no longer hides an earlier valid IE. Receive examples use the same selection for reference width (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8). |
-| `UDH.UnmarshalBinary` takes copied IE data from go-sms; zero-length IE data may be nil. | Mutating the parse input no longer changes decoded IE data. Treat nil and empty IE data alike. Standalone `InfoElement.UnmarshalBinary` still borrows its input. Empty or ignored headers still fail the strict UDH facade; malformed-final-IE errors now use a generic message. |
+| `UDH.UnmarshalBinary` and standalone `InfoElement.UnmarshalBinary` take copied IE data from go-sms; zero-length standalone IE data is nil. | Mutating the parse input no longer changes decoded IE data. Treat nil and empty IE data alike. Standalone underflows now use go-sms's `DecodeError` wrapping `tpdu.ErrUnderflow`; avoid matching the old error text. Errors consume zero bytes and leave the receiver unchanged. Empty or ignored headers still fail the strict UDH facade; malformed-final-IE errors use a generic message (TS 23.040 §9.2.3.24). |
+| Multipart raw NLI GSM rejects septets above `0x7f` during chunking. | Validate raw septets or supply text encoded with the selected GSM7 tables (TS 23.038 §§6.2.1–6.2.1.1; TS 23.040 §§9.2.3.24.1, 9.2.3.24.8). Payloads that already fit retain their prior acceptance. |
 | `data.FindEncoding` selects GSM7 by encodability in the default alphabet and default extension table, rather than ASCII membership. | `£`, `é`, `Δ` and `€` now select GSM7; backtick, ESC and controls outside the alphabet select UCS2. Extension characters consume two septets. If `GSM7BIT` has been replaced, that codec must also encode the text; for example, replacing it with `ASCII` makes `£` select UCS2. No national language tables are selected because the helper cannot return their IEs. With the initial codec, empty text selects GSM7; invalid UTF-8 selects UCS2, whose encoder still rejects it. 80 `£` characters now fit one segment instead of two (TS 23.038 §§6.2.1–6.2.1.1). |
 | GSM7 text setters reject caller-supplied NLI IEs that conflict with the selected tables. | Select tables with `NewGSM7` and matching NLI IEs; rebuild the message when changing a previously selected table. |
 | GSM7 `ShortMessage.GetMessage` now honors received NLI IEs. | Decode each part using its own UDH; select packed representation explicitly for peers that use it. |

@@ -806,6 +806,14 @@ IE data may be nil. Standalone `InfoElement.UnmarshalBinary` delegates to
 also copied and is nil for a zero-length IE. Errors return zero consumed
 bytes, leave the receiver unchanged and use go-sms's typed decode errors.
 
+`UDH.GetConcatInfo` returns the last concatenation IE that has the right
+length and values in range, and ignores the others (TS 23.040 §§9.2.3.24,
+9.2.3.24.1, 9.2.3.24.8). To read the values of an IE ignored for its values,
+decode it with go-sms, for example
+`tpdu.InformationElement{ID: ie.ID, Data: ie.Data}.ConcatInfo()`, which does
+not check their ranges and returns an error for the wrong length;
+`tpdu.ConcatInfo.Valid` reports whether the values are in range.
+
 SMPP framing stays in go-smpp. With UDHI set and a nonempty message field,
 `ShortMessage` parses only the declared header span. It preserves `00` and
 headers with a malformed final IE byte for byte in `IgnoredUDH()`, skips

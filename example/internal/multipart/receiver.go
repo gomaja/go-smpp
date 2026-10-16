@@ -52,20 +52,21 @@ func (r *Receiver) Add(pd *pdu.DeliverSM) (text string, ready bool, err error) {
 	// Use the same last-applicable IE and reference width as GetConcatInfo
 	// (TS 23.040 §§9.2.3.24, 9.2.3.24.1, 9.2.3.24.8).
 	info, found := header.ConcatInfo()
-	total, sequence, reference := byte(info.Total), byte(info.Seqno), uint16(info.Ref)
-	referenceType := byte(data.UDH_CONCAT_MSG_16_BIT_REF)
-	if found {
-		if !info.Ref16Bit {
-			referenceType = data.UDH_CONCAT_MSG_8_BIT_REF
-		}
-	} else {
-		total, sequence, reference, found = pd.GetSARConcatInfo()
+	if !found {
+		// SAR TLVs carry a 16-bit reference (SMPP v3.4 §§5.3.2.22–24). Valid
+		// applies the bounds of TS 23.040 V20.0.0 §9.2.3.24.8 to them: zero
+		// total or sequence, or sequence > total, is ignored.
+		total, sequence, reference, sar := pd.GetSARConcatInfo()
+		info = tpdu.ConcatInfo{Ref: int(reference), Ref16Bit: true, Total: int(total), Seqno: int(sequence)}
+		found = sar && info.Valid()
 	}
-	// TS 23.040 V20.0.0 §9.2.3.24.1 (8-bit) and §9.2.3.24.8 (16-bit):
-	// ignore the whole concatenation IE for zero total/sequence or sequence > total.
-	// Apply the same bounds to SAR TLVs (SMPP v3.4 §§5.3.2.22–24).
-	if !found || total == 0 || sequence == 0 || sequence > total {
+	if !found {
 		return text, true, nil
+	}
+	total, sequence, reference := info.Total, info.Seqno, uint16(info.Ref)
+	referenceType := byte(data.UDH_CONCAT_MSG_8_BIT_REF)
+	if info.Ref16Bit {
+		referenceType = data.UDH_CONCAT_MSG_16_BIT_REF
 	}
 
 	r.mu.Lock()
@@ -85,7 +86,7 @@ func (r *Receiver) Add(pd *pdu.DeliverSM) (text string, ready bool, err error) {
 	}
 	k := key{pd.SourceAddr, pd.DestAddr, reference, referenceType, coding}
 	m := r.pending[k]
-	if m != nil && len(m.parts) != int(total) {
+	if m != nil && len(m.parts) != total {
 		// A reused reference with a different total must not index the old buffer.
 		delete(r.pending, k)
 		m = nil
@@ -98,7 +99,7 @@ func (r *Receiver) Add(pd *pdu.DeliverSM) (text string, ready bool, err error) {
 		m = &message{parts: make([]string, total), seen: make([]bool, total), created: now}
 		r.pending[k] = m
 	}
-	i := int(sequence) - 1
+	i := sequence - 1
 	if !m.seen[i] {
 		m.parts[i], m.seen[i] = text, true
 		m.count++

@@ -168,8 +168,10 @@ func TestIncompleteSARAndLastUDH(t *testing.T) {
 }
 
 func TestSARUsesSixteenBitReference(t *testing.T) {
-	// sar_msg_ref_num has two octets (SMPP v3.4 §5.3.2.22): a reference above
-	// 255 is kept, and a SAR part never joins an 8-bit UDH message.
+	// sar_msg_ref_num has two octets (SMPP v3.4 §5.3.2.22) and both are kept:
+	// a SAR part joins a 16-bit UDH message with the same reference, but never
+	// an 8-bit UDH message or a SAR message whose reference differs only in
+	// its high octet.
 	var receiver Receiver
 	eight := part(t, "eight", 2, 1, 7, false)
 	if err := eight.Message.SetUDH(pdu.UDH{pdu.NewIEConcatMessage(2, 1, 7)}); err != nil {
@@ -184,9 +186,16 @@ func TestSARUsesSixteenBitReference(t *testing.T) {
 	if _, ready, err := receiver.Add(part(t, "A", 2, 1, 0x1234, true)); err != nil || ready {
 		t.Fatalf("first SAR part = %t, %v", ready, err)
 	}
-	text, ready, err := receiver.Add(part(t, "B", 2, 2, 0x1234, true))
+	if _, ready, err := receiver.Add(part(t, "Y", 2, 2, 0xab34, true)); err != nil || ready {
+		t.Fatalf("SAR references differing in the high octet joined: %t, %v", ready, err)
+	}
+	text, ready, err := receiver.Add(part(t, "B", 2, 2, 0x1234, false))
 	if err != nil || !ready || text != "AB" {
-		t.Fatalf("SAR completion = %q, %t, %v", text, ready, err)
+		t.Fatalf("SAR and 16-bit UDH completion = %q, %t, %v", text, ready, err)
+	}
+	text, ready, err = receiver.Add(part(t, "X", 2, 1, 0xab34, true))
+	if err != nil || !ready || text != "XY" || len(receiver.pending) != 2 {
+		t.Fatalf("SAR completion = %q, %t, %v, pending=%d", text, ready, err, len(receiver.pending))
 	}
 }
 

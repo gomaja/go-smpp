@@ -116,10 +116,10 @@ func (u UDH) FindInfoElement(id byte) (ie *InfoElement, found bool) {
 // §9.2.3.24). IEs with the wrong length, zero total or sequence, or sequence
 // greater than total are ignored (§§9.2.3.24.1, 9.2.3.24.8).
 // For an 8-bit reference, mref is that octet (0–255); a 16-bit reference
-// occupies the full uint16 range (0–65535). To read the values of an ignored
-// IE, decode it with go-sms's tpdu.InformationElement.ConcatInfo, which does
-// not check their ranges; tpdu.ConcatInfo.Valid reports whether a receiving
-// entity uses them.
+// occupies the full uint16 range (0–65535). To read the values of an IE
+// ignored for its values, decode it with go-sms's
+// tpdu.InformationElement.ConcatInfo, which does not check their ranges;
+// tpdu.ConcatInfo.Valid reports whether they are in range.
 func (u UDH) GetConcatInfo() (totalParts, partNum byte, mref uint16, found bool) {
 	info, found := u.smsHeader().ConcatInfo()
 	return byte(info.Total), byte(info.Seqno), uint16(info.Ref), found

@@ -844,6 +844,61 @@ additional space. `data.UCS2` counts encoded UTF-16 octets, including surrogate
 pairs, and `data.UCS2Strict` counts two octets per BMP character. Construction
 also checks SMPP's octet-length field (v3.4 §§5.2.21–22).
 
+For raw data, optionally stage a UDH with `SetUDH` first, then call
+`SetLongMessageDataWithEncoding` and `SubmitSM.Split` or `ShortMessage.Split`.
+The long setter retains the supplied bytes without copying and accepts any
+encoding; split before sending (SMPP v3.4 §§5.2.21–22). When a message fits,
+`SubmitSM.Split` returns the source PDU and the marshalers set UDHI only for
+[NLI IEs](#sending-national-language-text), so set UDHI in `esm_class` when
+staging any other header; multipart parts set it (SMPP v3.4 §5.2.12). For
+example, 8-bit data with a 16-bit application port IE (TS 23.040 §9.2.3.24.4):
+
+```go
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"log"
+
+	"github.com/gomaja/go-smpp/data"
+	"github.com/gomaja/go-smpp/pdu"
+)
+
+func main() {
+	submit := pdu.NewSubmitSM().(*pdu.SubmitSM)
+	var header pdu.UDH
+	// UDHL, 16-bit port IE, destination 5514, source 5515.
+	if _, err := header.UnmarshalBinary([]byte{6, 5, 4, 0x15, 0x8a, 0x15, 0x8b}); err != nil {
+		log.Fatal(err)
+	}
+	if err := submit.Message.SetUDH(header); err != nil {
+		log.Fatal(err)
+	}
+	if err := submit.Message.SetLongMessageDataWithEncoding(bytes.Repeat([]byte{0x80}, 269), data.BINARY8BIT2); err != nil {
+		log.Fatal(err)
+	}
+	parts, err := submit.Split()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, part := range parts {
+		payload, err := part.Message.GetMessageData()
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(len(payload)) // 128, 128, 13
+	}
+}
+```
+
+When the data comes from a `message_payload` TLV, the caller removes that
+TLV: `short_message` and `message_payload` must not be used together (SMPP
+v3.4 §4.4.1 Table 4-10), and `Split` keeps unrelated TLVs, including
+`message_payload`. With UDHI set, the payload begins with the UDH (SMPP v3.4
+§5.2.12); parse it with `UDH.UnmarshalBinary`, stage it with `SetUDH`, and pass
+only the remaining data to `SetLongMessageDataWithEncoding`.
+
 go-smpp retains concatenation width, position, count and reference allocation,
 custom splitter dispatch (including nested wrappers), and SMPP PDU assembly.
 Unknown text encodings still need a character-aware splitter. Packed GSM's
@@ -857,8 +912,9 @@ Raw data that already fits retains its existing acceptance, including odd
 UCS2 within the unrounded octet budget. Multipart raw NLI GSM now rejects
 septets above `0x7f` rather than forwarding them (TS 23.038 §6.2.1).
 Dangling ESC, odd UCS2 and final high-surrogate errors remain unchanged when
-splitting is required. Returned raw segments remain independent of the
-caller's supplied buffer.
+splitting is required. Newly built multipart segments are independent of the
+caller's supplied buffer. A message that fits is returned as the source and
+keeps the raw setter's buffer alias; callers needing ownership clone the input.
 
 ### data_coding
 

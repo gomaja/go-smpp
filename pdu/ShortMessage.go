@@ -72,8 +72,8 @@ func (c *ShortMessage) SetMessageWithEncoding(message string, enc data.Encoding)
 	return c.setTextMessage(message, enc, false)
 }
 
-// SetLongMessageWithEnc sets ShortMessage with message longer than  256 bytes
-// callers are expected to call Split() after this
+// SetLongMessageWithEnc encodes text without the 254-octet short_message limit,
+// including UDH (SMPP v3.4 §§5.2.21–22). Call Split before sending the message.
 func (c *ShortMessage) SetLongMessageWithEnc(message string, enc data.Encoding) error {
 	return c.setTextMessage(message, enc, true)
 }
@@ -185,6 +185,20 @@ func (c *ShortMessage) SetUDH(udh UDH) error {
 // (SMPP v3.4 Issue 1.2 §5.2.19). Split resolves it on returned parts.
 func (c *ShortMessage) SetMessageDataWithEncoding(d []byte, enc data.Encoding) error {
 	if err := c.validatePayload(d); err != nil {
+		return err
+	}
+	c.messageData, c.enc, c.message = d, enc, ""
+	return nil
+}
+
+// SetLongMessageDataWithEncoding sets raw data without the 254-octet
+// short_message limit, including UDH (SMPP v3.4 §§5.2.21–22), for example
+// message_payload octets (§5.3.2.32). It retains d without copying and enc as
+// given, including nil, clears retained text, and preserves the staged header.
+// Stage any UDH with SetUDH first, since SetUDH validates the complete field.
+// Only a header marshal error is returned. Call Split before sending the message.
+func (c *ShortMessage) SetLongMessageDataWithEncoding(d []byte, enc data.Encoding) error {
+	if _, err := c.headerBytes(); err != nil {
 		return err
 	}
 	c.messageData, c.enc, c.message = d, enc, ""
@@ -319,6 +333,16 @@ func (c *ShortMessage) payloadLimit() int {
 		return -1
 	}
 	return limit
+}
+
+// Split splits text or raw data within the user-data capacity of TS 23.040
+// §§9.2.3.24.1, 9.2.3.24.8. A message that fits is returned as the receiver
+// itself, resolving a nil encoding to data.DefaultGSM7(). Otherwise the receiver
+// is unchanged, and each part starts with a new concatenation IE followed by
+// the other staged IEs in order. The reference is 16-bit if the last staged
+// concatenation IE was 16-bit, and 8-bit otherwise.
+func (c *ShortMessage) Split() ([]*ShortMessage, error) {
+	return c.split()
 }
 
 // split splits one short message into multiple short messages with UDH according

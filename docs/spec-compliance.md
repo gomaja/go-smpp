@@ -720,6 +720,12 @@ creating new metadata; it does not interpret them as received information.
 
 ### Splitting budgets
 
+`SetLongMessageDataWithEncoding` stages raw octets without the 254-octet
+`short_message` limit (SMPP v3.4 §§5.2.21–22); stage any UDH with `SetUDH`
+first, then use `ShortMessage.Split` or `SubmitSM.Split` before sending.
+Both use the existing encoding budgets and concatenation policy below
+(TS 23.040 §§9.2.3.24.1, 9.2.3.24.8).
+
 `tpdu.UserDataCapacity` owns SMS capacity arithmetic using the actual complete
 marshalled header length, including UDHL, caller IEs, NLI and concatenation
 width (TS 23.040 §§9.2.3.16, 9.2.3.24). `tpdu.SplitUserData` owns ordinary

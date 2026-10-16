@@ -59,7 +59,7 @@ func (c *SubmitSM) GetResponse() PDU {
 	return NewSubmitSMRespFromReq(c)
 }
 
-// Split split a single long text message into multiple SubmitSM PDU,
+// Split splits a single long text or raw-data message into multiple SubmitSM PDUs.
 // Each have the TPUD within the GSM's User Data limit of 140 octet
 // If the message is short enough and doesn't need splitting,
 // Split() returns an array of length 1

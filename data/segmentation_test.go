@@ -47,3 +47,43 @@ func TestEncodedSplitCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodedSplitAppendIsolation(t *testing.T) {
+	nli, err := NewGSM7(GSM7Options{LockingShift: 1, SingleShift: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		enc  Encoding
+	}{
+		{"GSM7", GSM7BIT},
+		{"NLI", nli},
+		{"UCS2", UCS2},
+		{"UCS2Strict", UCS2Strict},
+		{"ASCII", ASCII},
+		{"LATIN1", LATIN1},
+		{"CYRILLIC", CYRILLIC},
+		{"HEBREW", HEBREW},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parts, err := tc.enc.(Splitter).EncodeSplit("AAAA", 2)
+			if err != nil || len(parts) < 2 {
+				t.Fatalf("split: parts=%x err=%v", parts, err)
+			}
+			wantNext := []byte("AA")
+			if tc.enc == UCS2 || tc.enc == UCS2Strict {
+				wantNext = []byte{0, 'A'}
+			}
+			if !bytes.Equal(parts[1], wantNext) {
+				t.Fatalf("second part: got %x want %x", parts[1], wantNext)
+			}
+			parts[0] = append(parts[0], 'X')
+			parts[0][0] = 'Y'
+			parts[0][len(parts[0])-1] = 'Z'
+			if !bytes.Equal(parts[1], wantNext) {
+				t.Fatalf("append/write changed second part: got %x want %x", parts[1], wantNext)
+			}
+		})
+	}
+}

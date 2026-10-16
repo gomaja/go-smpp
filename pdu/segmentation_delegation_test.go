@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
@@ -107,24 +108,117 @@ func TestMalformedUCS2SegmentationRetainsErrors(t *testing.T) {
 }
 
 func TestRawSegmentationKeepsCallerOwnership(t *testing.T) {
-	for _, enc := range []data.Encoding{data.GSM7BIT, data.BINARY8BIT1, data.BINARY8BIT2} {
-		src := bytes.Repeat([]byte{0x41}, 200)
-		c := ShortMessage{enc: enc, messageData: src}
-		if enc == data.GSM7BIT {
-			c.udHeader = UDH{{ID: 0x25, Data: []byte{1}}}
-		}
-		parts, err := c.split()
-		if err != nil || len(parts) < 2 {
-			t.Fatalf("split %T: %v", enc, err)
-		}
-		src[0] = 0xff
-		if parts[0].messageData[0] != 0x41 {
-			t.Fatalf("%T segment aliases caller", enc)
-		}
-		parts[0].messageData[0] = 0x42
-		if src[0] != 0xff || parts[1].messageData[0] != 0x41 {
-			t.Fatalf("%T mutation escaped segment", enc)
-		}
+	for _, tc := range []struct {
+		name string
+		enc  data.Encoding
+	}{
+		{"NLI", data.GSM7BIT},
+		{"binary1", data.BINARY8BIT1},
+		{"binary2", data.BINARY8BIT2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enc := tc.enc
+			src := bytes.Repeat([]byte{0x41}, 200)
+			c := ShortMessage{enc: enc, messageData: src}
+			if enc == data.GSM7BIT {
+				c.udHeader = UDH{{ID: 0x25, Data: []byte{1}}}
+			}
+			parts, err := c.split()
+			if err != nil || len(parts) < 2 {
+				t.Fatalf("split %T: %v", enc, err)
+			}
+			src[0] = 0xff
+			if parts[0].messageData[0] != 0x41 {
+				t.Fatalf("%T segment aliases caller", enc)
+			}
+			parts[0].messageData[0] = 0x42
+			if src[0] != 0xff || parts[1].messageData[0] != 0x41 {
+				t.Fatalf("%T mutation escaped segment", enc)
+			}
+			wantSource := bytes.Clone(src)
+			wantNext := bytes.Clone(parts[1].messageData)
+			parts[0].messageData = append(parts[0].messageData, 0x58)
+			parts[0].messageData[0] = 0x43
+			parts[0].messageData[len(parts[0].messageData)-1] = 0x59
+			if !bytes.Equal(parts[1].messageData, wantNext) || !bytes.Equal(src, wantSource) {
+				t.Fatalf("%T append/write changed the next segment or caller buffer", enc)
+			}
+		})
+	}
+}
+
+func TestPackedSplitFinalSuffixLookahead(t *testing.T) {
+	// Boundaries recorded from 977ff9c. SMPP has no septet count, so both
+	// the prefix and the final suffix must preserve the CR receive rule
+	// (TS 23.038 §6.1.2.3.1) at the complete header's fill alignment
+	// (TS 23.040 §9.2.3.24).
+	for _, tc := range []struct {
+		name                   string
+		header                 UDH
+		textLength             int
+		textLengths, payloads  []int
+		headerOctets, fillBits int
+	}{
+		{"constructor", nil, 305, []int{151, 152, 2}, []int{133, 134, 2}, 6, 1},
+		{"wide", UDH{NewIEConcatMessage16Bit(2, 1, 0x1234)}, 303, []int{150, 151, 2}, []int{132, 133, 2}, 7, 0},
+		{"opaque0", UDH{{ID: 0x70}, NewIEConcatMessage(2, 1, 1)}, 299, []int{148, 149, 2}, []int{131, 132, 3}, 8, 6},
+		{"opaque1", UDH{{ID: 0x70, Data: []byte{0x41}}, NewIEConcatMessage(2, 1, 1)}, 297, []int{147, 148, 2}, []int{130, 131, 3}, 9, 5},
+		{"opaque2", UDH{{ID: 0x70, Data: []byte{0x41, 0x42}}, NewIEConcatMessage(2, 1, 1)}, 295, []int{146, 147, 2}, []int{129, 130, 3}, 10, 4},
+		{"opaque3", UDH{{ID: 0x70, Data: []byte{0x41, 0x42, 0x43}}, NewIEConcatMessage(2, 1, 1)}, 293, []int{145, 146, 2}, []int{128, 129, 3}, 11, 3},
+		{"opaque4", UDH{{ID: 0x70, Data: []byte{0x41, 0x42, 0x43, 0x44}}, NewIEConcatMessage(2, 1, 1)}, 291, []int{144, 144, 3}, []int{127, 127, 3}, 12, 2},
+		{"opaque-wide", UDH{{ID: 0x70}, NewIEConcatMessage16Bit(2, 1, 0x1234)}, 297, []int{147, 148, 2}, []int{130, 131, 3}, 9, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := strings.Repeat("\r", tc.textLength)
+			var parts []*ShortMessage
+			var err error
+			if tc.header == nil {
+				parts, err = NewLongMessageWithEncoding(text, data.GSM7BITPACKED)
+			} else {
+				p := NewSubmitSM().(*SubmitSM)
+				if err := p.Message.SetUDH(tc.header); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.Message.SetLongMessageWithEnc(text, data.GSM7BITPACKED); err != nil {
+					t.Fatal(err)
+				}
+				var pdus []*SubmitSM
+				pdus, err = p.Split()
+				for _, part := range pdus {
+					parts = append(parts, &part.Message)
+				}
+			}
+			if err != nil || len(parts) != len(tc.textLengths) {
+				t.Fatalf("split: got %d parts, err=%v; want %d parts", len(parts), err, len(tc.textLengths))
+			}
+			var joined strings.Builder
+			for i, part := range parts {
+				payload, err := part.GetMessageData()
+				if err != nil || len(payload) != tc.payloads[i] {
+					t.Fatalf("part %d payload: got %d octets, err=%v; want %d", i, len(payload), err, tc.payloads[i])
+				}
+				h := part.UDH().UDHL()
+				if h != tc.headerOctets || packedFillBits(h) != tc.fillBits {
+					t.Fatalf("part %d header: got %d octets/%d fill bits; want %d/%d", i, h, packedFillBits(h), tc.headerOctets, tc.fillBits)
+				}
+				wire := NewBuffer(nil)
+				if err := part.Marshal(wire); err != nil {
+					t.Fatal(err)
+				}
+				var received ShortMessage
+				if err := received.Unmarshal(wire, true); err != nil {
+					t.Fatal(err)
+				}
+				decoded, err := received.GetMessageWithEncoding(data.GSM7BITPACKED)
+				if err != nil || decoded != strings.Repeat("\r", tc.textLengths[i]) {
+					t.Fatalf("part %d decode: got %q, err=%v; want %d CRs", i, decoded, err, tc.textLengths[i])
+				}
+				joined.WriteString(decoded)
+			}
+			if joined.String() != text {
+				t.Fatal("decoded parts do not recover the complete text")
+			}
+		})
 	}
 }
 

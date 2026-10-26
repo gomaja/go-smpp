@@ -51,6 +51,12 @@ returned no matching records. These encoding RFCs have no current sponsoring
 working group; the active mailmaint documents concern email-address syntax,
 not replacement UTF transformations.
 
+TS 23.038 and TS 23.040 were rechecked on **2026-10-26**, including the IE
+clauses cited below: both remain at V20.0.0, and the correction registers show
+no newer approved replacement affecting this work. RFC 3629 and RFC 2781 were
+rechecked the same day against both authorities and their errata searches,
+with the same status and no matching errata.
+
 No IETF RFC governs SMPP binary PDUs or bind/session behavior. The [RFC Editor
 index](https://www.rfc-editor.org/rfc-index.xml) and [Datatracker SMPP document
 query](https://datatracker.ietf.org/api/v1/doc/document/?name__contains=smpp&format=json)
@@ -718,6 +724,13 @@ reference width, for reassembly, and apply `Valid` to SAR TLVs, which carry a
 16-bit reference (SMPP v3.4 §§5.3.2.22–24). Splitting still strips all caller concatenation IEs before
 creating new metadata; it does not interpret them as received information.
 
+For other IE values, convert `pdu.InfoElement` to
+`tpdu.InformationElement{ID: ie.ID, Data: ie.Data}` and use go-sms's typed
+decoders, including `PortAddress` (TS 23.040 §§9.2.3.24.3–4),
+`SpecialMessageIndication` (§9.2.3.24.2) and `TextFormatting`
+(§9.2.3.24.10.1.1). These expose IE values directly; go-smpp retains the
+complete header for SMPP framing and forwarding.
+
 ### Splitting budgets
 
 `SetLongMessageDataWithEncoding` stages raw octets without the 254-octet
@@ -907,6 +920,13 @@ the main table, ESC followed by ESC or end-of-input displays a space, and bytes
 above `0x7f` become spaces. Encoding returns `gsm7.ErrUnencodable` for a
 character outside the alphabet and `gsm7.ErrInvalidUTF8` for malformed UTF-8,
 with byte offsets. Errors retain their types for `errors.As`.
+go-sms's `gsm7.DecodeReport`, or `DecodeReport` on a `gsm7.Decoder`
+configured with the same national language tables, returns the same text and
+lists each replaced septet with its septet offset, rule and resulting rune. It
+takes unpacked septets, so packed data is unpacked with its fill bits first.
+The extension fallback and the spaces for a repeated or final ESC follow
+TS 23.038 §§6.2.1–6.2.1.1; the report also lists the spaces go-sms substitutes
+for an unassigned septet and for a byte above `0x7f`, which is not a septet.
 
 The public `data.GSM7` x/text factory, its streaming transformers,
 `ValidateGSM7String`, `ValidateGSM7Buffer`, `GetEscapeChars`, `IsEscapeChar`,
@@ -1012,6 +1032,10 @@ individually. RFC 2781 §2.2 leaves malformed-input recovery
 unspecified; the previous x/text replacement behavior is not reproduced for
 odd lengths or a final high surrogate. The fixed big-endian path does not
 strip a BOM or switch byte order (RFC 2781 §3.3).
+go-sms's `ucs2.DecodeReport` reports the byte offset and unit of each unpaired
+surrogate replaced with U+FFFD under this recovery policy (RFC 2781 §2.2).
+Literal U+FFFD, the final odd octet and a final high surrogate returned as
+`ErrDanglingSurrogate` are not replacements.
 
 `data.ASCII` rejects unrepresentable text. ASCII, ISO-8859 and the explicit
 UTF-16 BOM/endian helpers retain their existing implementations; x/text remains

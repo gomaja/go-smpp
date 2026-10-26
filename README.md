@@ -814,6 +814,11 @@ decode it with go-sms, for example
 not check their ranges and returns an error for the wrong length;
 `tpdu.ConcatInfo.Valid` reports whether the values are in range.
 
+Other IE values can be read with go-sms's typed `tpdu.InformationElement`
+decoders, such as `PortAddress` (TS 23.040 §§9.2.3.24.3–4),
+`SpecialMessageIndication` (§9.2.3.24.2) and `TextFormatting`
+(§9.2.3.24.10.1.1), using the same `ID` and `Data` conversion.
+
 SMPP framing stays in go-smpp. With UDHI set and a nonempty message field,
 `ShortMessage` parses only the declared header span. It preserves `00` and
 headers with a malformed final IE byte for byte in `IgnoredUDH()`, skips
@@ -928,6 +933,10 @@ Default-alphabet and extension-table conversion uses
 extension falls back to the main table, a repeated or trailing ESC displays a
 space, and a byte above `0x7f` becomes a space. Encoding rejects malformed UTF-8
 and unrepresentable characters with the dependency's typed errors.
+go-sms's `gsm7.DecodeReport` returns the same text as `data.GSM7BIT.Decode`
+and lists each replaced septet with its offset and rule. It takes unpacked septets, so unpack packed
+data with its fill bits first, and decode national language text with
+`DecodeReport` on a `gsm7.Decoder` configured with the message's tables.
 
 `FromDataCoding` keeps the SMPP v3.4 §5.2.19 meanings for `0x00`–`0x0f`, including
 ASCII, Latin-1, binary and opaque alphabets. For all other bytes it uses
@@ -955,6 +964,9 @@ becomes U+FFFD, with only `ucs2.ErrInvalidLength`. An even-length payload
 ending in a high surrogate returns the decoded prefix and
 `ucs2.ErrDanglingSurrogate`. Other unpaired surrogates become U+FFFD. Neither
 decoder strips a BOM or changes the fixed big-endian byte order.
+For diagnostics, go-sms's `ucs2.DecodeReport` reports each unpaired surrogate
+replaced with U+FFFD; this recovery policy remains an implementation choice
+under RFC 2781 §2.2.
 
 ASCII encoding rejects unrepresentable characters. Latin-1 preserves C1
 controls. Cyrillic and Hebrew codecs replace C1 controls on decode and reject

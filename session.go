@@ -47,7 +47,8 @@ type Session struct {
 type SessionOption func(session *Session)
 
 // NewSession creates new session for TX, RX, TRX.
-// It calls NewSessionContext with context.Background().
+// It connects with Connect, which cannot be cancelled. Use NewSessionContext to abandon
+// the initial connection.
 //
 // Session will `non-stop`, automatically rebind (create new and authenticate connection with SMSC) when
 // unexpected error happened.
@@ -56,15 +57,18 @@ type SessionOption func(session *Session)
 //
 // Setting `rebindingInterval <= 0` will disable `auto-rebind` functionality.
 func NewSession(c Connector, settings Settings, rebindingInterval time.Duration, opts ...SessionOption) (session *Session, err error) {
-	return NewSessionContext(context.Background(), c, settings, rebindingInterval, opts...)
+	return newSession(c, settings, rebindingInterval, func() (*Connection, error) {
+		return c.Connect()
+	}, opts...)
 }
 
 // NewSessionContext creates new session for TX, RX, TRX as NewSession does, using ctx for the
 // initial connection only. ctx must be non-nil. After a session is returned, cancelling or
 // expiring ctx has no effect on it; the session uses its own context for rebinding, ended by Close.
 //
-// If c implements ConnectContext(context.Context) (*Connection, error), as TXConnector, RXConnector
-// and TRXConnector do, ctx cancels both dialing and bind I/O and closes the connection.
+// If c implements ConnectContext(context.Context) (*Connection, error), ctx is passed to that method.
+// The built-in TXConnector, RXConnector and TRXConnector use it to cancel dialing and bind I/O
+// and close the connection. A custom ConnectContext is responsible for honoring cancellation.
 // A custom Connector lacking ConnectContext must return from Connect before cancellation can finish.
 // If ctx is already done, Connect is not called; if ctx is done when Connect returns, any returned
 // connection is closed and ctx.Err() is returned.
@@ -72,8 +76,25 @@ func NewSessionContext(ctx context.Context, c Connector, settings Settings, rebi
 	if ctx == nil {
 		panic("gosmpp: nil context")
 	}
-	// Loop through each option
+	return newSession(c, settings, rebindingInterval, func() (*Connection, error) {
+		if connector, ok := c.(contextConnector); ok {
+			return connector.ConnectContext(ctx)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := c.Connect()
+		if contextErr := ctx.Err(); contextErr != nil {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, contextErr
+		}
+		return conn, err
+	}, opts...)
+}
 
+func newSession(c Connector, settings Settings, rebindingInterval time.Duration, initialConnect func() (*Connection, error), opts ...SessionOption) (session *Session, err error) {
 	if settings.ReadTimeout <= 0 || settings.ReadTimeout <= settings.EnquireLink {
 		return nil, fmt.Errorf("invalid settings: ReadTimeout must greater than max(0, EnquireLink)")
 	}
@@ -91,21 +112,7 @@ func NewSessionContext(ctx context.Context, c Connector, settings Settings, rebi
 		}
 	}
 
-	var conn *Connection
-	if connector, ok := c.(contextConnector); ok {
-		conn, err = connector.ConnectContext(ctx)
-	} else {
-		if err = ctx.Err(); err != nil {
-			return nil, err
-		}
-		conn, err = c.Connect()
-		if contextErr := ctx.Err(); contextErr != nil {
-			if conn != nil {
-				_ = conn.Close()
-			}
-			return nil, contextErr
-		}
-	}
+	conn, err := initialConnect()
 	if err == nil {
 		session = &Session{
 			c:                 c,

@@ -55,14 +55,17 @@ Use `TXConnector`, `RXConnector` or `TRXConnector` with `NewSession`. Set
 `Auth.SMSC` to a reachable SMSC endpoint. Full programs are in
 [example/](example/).
 
-Use `NewSessionContext(ctx, connector, settings, rebindingInterval, opts...)` to
-abandon the initial dial and bind, for example during shutdown. Pass a non-nil
-context. After it returns a session, cancelling or expiring ctx has no effect
-on that session or its rebinding; call `Session.Close()` to stop it.
-`NewSession` calls `NewSessionContext` with `context.Background()`.
+Use `NewSessionContext(ctx, connector, settings, rebindingInterval, opts...)`
+with the built-in connectors to abandon the initial dial and bind, for example
+during shutdown. Pass a non-nil context. After it returns a session, cancelling
+or expiring ctx has no effect on that session or its rebinding; call
+`Session.Close()` to stop it.
+`NewSession` connects with `Connect()`, which cannot be cancelled.
 
-A custom `Connector` lacking `ConnectContext(context.Context) (*Connection,
-error)` must return from `Connect()` before initial cancellation can finish.
+If a custom `Connector` implements `ConnectContext(context.Context) (*Connection,
+error)`, ctx is passed to that method, which is responsible for honoring cancellation.
+A connector lacking that method must return from `Connect()` before initial
+cancellation can finish.
 An already-done context skips `Connect()`; if ctx is done when it returns, any
 returned connection is closed and the constructor returns `ctx.Err()`.
 
@@ -1105,7 +1108,7 @@ implementations as follows. The contracts above describe the resulting behavior.
 
 | Change | Replacement |
 | --- | --- |
-| `NewSessionContext` can cancel the initial dial and bind. | Pass a non-nil context to bound initial connection work; use `Session.Close()` to stop a returned session. Custom connectors need `ConnectContext` to interrupt an in-flight connection. |
+| `NewSessionContext` supports initial connection cancellation. | With built-in connectors, pass a non-nil context to abandon the initial dial and bind; use `Session.Close()` to stop a returned session. A custom `ConnectContext` must honor cancellation. |
 | `Dialer` requires `DialContext(context.Context, string) (net.Conn, error)`. | Adapt with `DialerFunc` and pass the context to TCP/TLS dialing and handshaking. |
 | `NonTLSDialer` is a `Dialer` value, rather than a callable function. | Pass it to a connector, or call its `DialContext` method. |
 | `WithBindTimeout` and connector options are available, including on `TXConnector`. | Pass options when constructing connectors. |

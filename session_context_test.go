@@ -47,7 +47,7 @@ func TestConnectContextBindTimeoutBeforeContextDeadline(t *testing.T) {
 }
 
 func TestNewSessionContextCancelBind(t *testing.T) {
-	auth, bound, peerClosed, stop := sessionSilentBindPeer(t)
+	auth, bound, peerClosed, _, stop := sessionSilentBindPeer(t)
 	defer stop()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -140,21 +140,22 @@ func TestNewSessionContextAlreadyDone(t *testing.T) {
 }
 
 func TestNewSessionContextDeadlineBind(t *testing.T) {
-	auth, bound, peerClosed, stop := sessionSilentBindPeer(t)
+	auth, bound, peerClosed, stopAccepting, stop := sessionSilentBindPeer(t)
 	defer stop()
-	// The peer receives the bind but never sends a response.
+	// Expiry may occur before dialing or writing the bind.
 	deadlineCtx, expire := context.WithDeadline(context.Background(), time.Now().Add(50*time.Millisecond))
 	defer expire()
 	results, _ := sessionContextStart(t, deadlineCtx, RXConnector(NonTLSDialer, auth), Settings{ReadTimeout: time.Hour}, 0)
-	if err := sessionContextReceive(t, bound); err != nil {
-		t.Fatal(err)
-	}
 	result := sessionContextReceive(t, results)
 	if result.session != nil || !errors.Is(result.err, context.DeadlineExceeded) {
 		t.Fatalf("NewSessionContext = (%v, %v), want nil session and deadline exceeded", result.session, result.err)
 	}
-	if err := sessionContextReceive(t, peerClosed); !errors.Is(err, io.EOF) {
-		t.Fatalf("peer read = %v, want EOF", err)
+	// Unblock Accept if no connection was made, leaving accepted peers open to observe EOF.
+	stopAccepting()
+	if err := sessionContextReceive(t, bound); err == nil {
+		if err := sessionContextReceive(t, peerClosed); !errors.Is(err, io.EOF) {
+			t.Fatalf("peer read = %v, want EOF", err)
+		}
 	}
 }
 
@@ -350,7 +351,7 @@ func sessionContextReceive[T any](t *testing.T, ch <-chan T) T {
 	}
 }
 
-func sessionSilentBindPeer(t *testing.T) (Auth, <-chan error, <-chan error, func()) {
+func sessionSilentBindPeer(t *testing.T) (Auth, <-chan error, <-chan error, func(), func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -377,12 +378,53 @@ func sessionSilentBindPeer(t *testing.T) (Auth, <-chan error, <-chan error, func
 		}
 		peerClosed <- err
 	}()
+	stopAccepting := func() { _ = ln.Close() }
 	stop := func() {
-		_ = ln.Close()
+		stopAccepting()
 		if peer := <-accepted; peer != nil {
 			_ = peer.Close()
 		}
 		lifecycleWait(t, done)
 	}
-	return Auth{SMSC: ln.Addr().String(), SystemID: "synthetic", Password: "synthetic"}, bound, peerClosed, stop
+	return Auth{SMSC: ln.Addr().String(), SystemID: "synthetic", Password: "synthetic"}, bound, peerClosed, stopAccepting, stop
+}
+
+type sessionDispatchConnector struct {
+	connectErr error
+	contextErr error
+}
+
+func (c sessionDispatchConnector) Connect() (*Connection, error) { return nil, c.connectErr }
+func (c sessionDispatchConnector) ConnectContext(context.Context) (*Connection, error) {
+	return nil, c.contextErr
+}
+func (sessionDispatchConnector) GetBindType() pdu.BindingType { return pdu.Transceiver }
+
+func TestNewSessionInitialConnectDispatch(t *testing.T) {
+	connectErr := errors.New("Connect selected")
+	contextErr := errors.New("ConnectContext selected")
+	c := sessionDispatchConnector{connectErr: connectErr, contextErr: contextErr}
+	settings := Settings{ReadTimeout: time.Hour}
+	for _, tc := range []struct {
+		name   string
+		create func() (*Session, error)
+		want   error
+	}{
+		{name: "NewSession", create: func() (*Session, error) { return NewSession(c, settings, 0) }, want: connectErr},
+		{name: "NewSessionContext", create: func() (*Session, error) { return NewSessionContext(context.Background(), c, settings, 0) }, want: contextErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := tc.create()
+			if s != nil || err != tc.want {
+				t.Fatalf("constructor = (%v, %v), want nil session and %v", s, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewSessionNilConnectorInvalidSettings(t *testing.T) {
+	s, err := NewSession(nil, Settings{}, 0)
+	if s != nil || err == nil || err.Error() != "invalid settings: ReadTimeout must greater than max(0, EnquireLink)" {
+		t.Fatalf("NewSession = (%v, %v), want nil session and settings error", s, err)
+	}
 }

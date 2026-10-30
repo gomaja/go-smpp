@@ -122,6 +122,9 @@ func connectContext(ctx context.Context, dialer Dialer, addr string, bindReq *pd
 		}
 		if contextErr := ctx.Err(); contextErr != nil {
 			err = contextErr
+		} else if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			// The I/O deadline can fire before the context's timer publishes Err.
+			err = context.DeadlineExceeded
 		}
 		if err != nil {
 			_ = conn.Close()

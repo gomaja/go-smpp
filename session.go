@@ -47,6 +47,7 @@ type Session struct {
 type SessionOption func(session *Session)
 
 // NewSession creates new session for TX, RX, TRX.
+// It calls NewSessionContext with context.Background().
 //
 // Session will `non-stop`, automatically rebind (create new and authenticate connection with SMSC) when
 // unexpected error happened.
@@ -55,6 +56,22 @@ type SessionOption func(session *Session)
 //
 // Setting `rebindingInterval <= 0` will disable `auto-rebind` functionality.
 func NewSession(c Connector, settings Settings, rebindingInterval time.Duration, opts ...SessionOption) (session *Session, err error) {
+	return NewSessionContext(context.Background(), c, settings, rebindingInterval, opts...)
+}
+
+// NewSessionContext creates new session for TX, RX, TRX as NewSession does, using ctx for the
+// initial connection only. ctx must be non-nil. After a session is returned, cancelling or
+// expiring ctx has no effect on it; the session uses its own context for rebinding, ended by Close.
+//
+// If c implements ConnectContext(context.Context) (*Connection, error), as TXConnector, RXConnector
+// and TRXConnector do, ctx cancels both dialing and bind I/O and closes the connection.
+// A custom Connector lacking ConnectContext must return from Connect before cancellation can finish.
+// If ctx is already done, Connect is not called; if ctx is done when Connect returns, any returned
+// connection is closed and ctx.Err() is returned.
+func NewSessionContext(ctx context.Context, c Connector, settings Settings, rebindingInterval time.Duration, opts ...SessionOption) (session *Session, err error) {
+	if ctx == nil {
+		panic("gosmpp: nil context")
+	}
 	// Loop through each option
 
 	if settings.ReadTimeout <= 0 || settings.ReadTimeout <= settings.EnquireLink {
@@ -74,7 +91,21 @@ func NewSession(c Connector, settings Settings, rebindingInterval time.Duration,
 		}
 	}
 
-	conn, err := c.Connect()
+	var conn *Connection
+	if connector, ok := c.(contextConnector); ok {
+		conn, err = connector.ConnectContext(ctx)
+	} else {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err = c.Connect()
+		if contextErr := ctx.Err(); contextErr != nil {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, contextErr
+		}
+	}
 	if err == nil {
 		session = &Session{
 			c:                 c,

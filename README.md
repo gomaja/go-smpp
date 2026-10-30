@@ -55,6 +55,20 @@ Use `TXConnector`, `RXConnector` or `TRXConnector` with `NewSession`. Set
 `Auth.SMSC` to a reachable SMSC endpoint. Full programs are in
 [example/](example/).
 
+Use `NewSessionContext(ctx, connector, settings, rebindingInterval, opts...)`
+with the built-in connectors to abandon the initial dial and bind, for example
+during shutdown. Pass a non-nil context. After it returns a session, cancelling
+or expiring ctx has no effect on that session or its rebinding; call
+`Session.Close()` to stop it.
+`NewSession` connects with `Connect()`, which cannot be cancelled.
+
+If a custom `Connector` implements `ConnectContext(context.Context) (*Connection,
+error)`, ctx is passed to that method, which is responsible for honoring cancellation.
+A connector lacking that method must return from `Connect()` before initial
+cancellation can finish.
+An already-done context skips `Connect()`; if ctx is done when it returns, any
+returned connection is closed and the constructor returns `ctx.Err()`.
+
 ```go
 package main
 
@@ -185,7 +199,8 @@ bind write and response read. Set `WithBindTimeout(duration)` on TX, RX or TRX
 connectors to change it; non-positive values use the default. Successful
 exchanges clear this deadline before session I/O.
 
-Built-in connectors also expose `ConnectContext(context.Context)`, which session
+Built-in connectors also expose `ConnectContext(context.Context)`, which
+`NewSessionContext` uses to cancel the initial dial and bind, and session
 rebinding uses to interrupt bind I/O on shutdown. A custom connector without
 that method must return from `Connect()` before external `Close()` can finish.
 `Dialer.DialContext` accepts a context; the built-in TCP dialer uses
@@ -1093,6 +1108,7 @@ implementations as follows. The contracts above describe the resulting behavior.
 
 | Change | Replacement |
 | --- | --- |
+| `NewSessionContext` supports initial connection cancellation. | With built-in connectors, pass a non-nil context to abandon the initial dial and bind; use `Session.Close()` to stop a returned session. A custom `ConnectContext` must honor cancellation. |
 | `Dialer` requires `DialContext(context.Context, string) (net.Conn, error)`. | Adapt with `DialerFunc` and pass the context to TCP/TLS dialing and handshaking. |
 | `NonTLSDialer` is a `Dialer` value, rather than a callable function. | Pass it to a connector, or call its `DialContext` method. |
 | `WithBindTimeout` and connector options are available, including on `TXConnector`. | Pass options when constructing connectors. |

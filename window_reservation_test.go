@@ -105,8 +105,7 @@ func TestWindowWriterCallbackRejectsOwnFullQueue(t *testing.T) {
 				}
 			case <-time.After(300 * time.Millisecond):
 				out.stop(ExplicitClosing)
-				<-returned
-				t.Fatal("writer callback waited for its own queue")
+				t.Fatalf("writer callback waited for its own queue; after stop it returned %v", <-returned)
 			}
 		})
 	}
@@ -534,8 +533,7 @@ func TestWindowReceivingErrorWriterCallbackRejectsOwnFullQueue(t *testing.T) {
 		}
 	case <-time.After(300 * time.Millisecond):
 		out.stop(ExplicitClosing)
-		<-result
-		t.Fatal("receiving callback waited for its own writer")
+		t.Fatalf("receiving callback waited for its own writer; after stop it returned %v", <-result)
 	}
 }
 

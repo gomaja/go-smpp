@@ -118,7 +118,10 @@ func TestSessionCloseCancelsBlockedDefaultDialer(t *testing.T) {
 		t.Error("Close waited for the operating system's TCP dial timeout")
 		closeListener()
 		select {
-		case <-closed:
+		case err := <-closed:
+			if err != nil {
+				t.Errorf("Close after releasing blocked dial: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("closing the listener did not release the blocked dial")
 		}

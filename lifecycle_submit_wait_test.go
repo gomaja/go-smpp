@@ -136,7 +136,10 @@ func testLifecycleSubmitCloseCycle(t *testing.T, server, closeFirst bool) {
 		// writer is stuck in a callback, so a failing regression can clean up.
 		upstream.bound().stop(ExplicitClosing)
 		select {
-		case <-closeReturned:
+		case err := <-closeReturned:
+			if err != nil {
+				t.Errorf("downstream close after upstream shutdown: %v", err)
+			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("upstream shutdown did not release the forwarding callback")
 		}

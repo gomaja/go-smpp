@@ -67,7 +67,10 @@ func TestWindowHousekeepingEnquirySurvivesStoreOutage(t *testing.T) {
 		t.Fatal("housekeeping enquiry did not reach the peer")
 	}
 	select {
-	case <-failures:
+	case err := <-failures:
+		if err == nil || err.Error() != "store unavailable" {
+			t.Fatalf("failed retirement error = %v, want store unavailable", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("failed retirement was not reported via OnReceivingError")
 	}

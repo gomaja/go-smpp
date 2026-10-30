@@ -149,7 +149,11 @@ func TestServerOldPeerResponseStrippingReported(t *testing.T) {
 		t.Fatalf("TLVs not stripped: %x", raw)
 	}
 	select {
-	case <-errs:
+	case err := <-errs:
+		var versionErr *UnsupportedOptionalParametersError
+		if !errors.As(err, &versionErr) || !versionErr.Stripped || versionErr.SystemID != "sys" || versionErr.InterfaceVersion != 0x33 {
+			t.Fatalf("stripped response version error: %v", err)
+		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("stripped response TLVs were not reported")
 	}

@@ -293,7 +293,9 @@ WriteTimeout is non-positive.
 Encoding failures are available through `ByteBuffer.Err()` and `errors.Is(err,
 pdu.ErrEncode)`. `Connection.WritePDU` returns `*pdu.EncodeError` with the
 offending PDU; `OnSubmitError` receives it while the session stays connected.
-Check buffer errors before writing marshalled bytes.
+Check buffer errors before writing marshalled bytes. The buffer's error text is
+the cause alone; `*pdu.EncodeError` and the bind error add "cannot encode PDU"
+once.
 
 SubmitToSystemID checks encoding synchronously before queuing. Encoding errors
 reported asynchronously keep the bind. An invalid handler response reports

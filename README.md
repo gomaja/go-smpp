@@ -953,6 +953,19 @@ and lists each replaced septet with its offset and rule. It takes unpacked septe
 data with its fill bits first, and decode national language text with
 `DecodeReport` on a `gsm7.Decoder` configured with the message's tables.
 
+`data.GSM7BIT`, `data.GSM7BITPACKED` and `data.NewGSM7` codecs do not substitute:
+unrepresentable characters still return `gsm7.ErrUnencodable`, and
+`data.FindEncoding` falls back to UCS2. A sender that needs GSM 7 bit despite
+such text can call `EncodeReport` on a `gsm7.Encoder` made with
+`gsm7.WithSubstitute` or `gsm7.WithSubstituteFunc`, selecting the message's
+tables with `gsm7.WithCharset` / `gsm7.WithExtCharset`. Choose substitutes
+representable in those tables; the report records each substituted character's
+byte offset, original rune and substitute. On success, decode the returned
+unpacked septets with a `gsm7.Decoder` using the same tables, then pass that
+text to `pdu.NewLongMessageWithEncoding` with a `data.NewGSM7` codec using the
+same locking/single-shift selectors and the desired `Packed` setting. This
+re-encodes the same septets and handles NLI headers, packing and splitting.
+
 `FromDataCoding` keeps the SMPP v3.4 §5.2.19 meanings for `0x00`–`0x0f`, including
 ASCII, Latin-1, binary and opaque alphabets. For all other bytes it uses
 `tpdu.DCS` from go-sms as a lenient TP-DCS extension under TS 23.038 §4, preserving

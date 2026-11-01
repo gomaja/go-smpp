@@ -3,10 +3,14 @@ package data_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gomaja/go-smpp/data"
+	"github.com/gomaja/go-smpp/pdu"
 	"github.com/gomaja/go-sms/encoding/gsm7"
+	"github.com/gomaja/go-sms/encoding/gsm7/charset"
 	"github.com/gomaja/go-sms/encoding/ucs2"
 )
 
@@ -123,6 +127,82 @@ func TestAdoptionGSM7TypedEncodeErrors(t *testing.T) {
 		var invalid gsm7.ErrInvalidUTF8
 		if !errors.As(err, &invalid) || invalid.Offset != 1 || invalid.Byte != 0xff {
 			t.Errorf("%T invalidUTF8=%x,%T %v; want gsm7.ErrInvalidUTF8 at offset 1", enc, got, err, err)
+		}
+	}
+}
+
+func TestAdoptionGSM7SubstitutionTextHandoff(t *testing.T) {
+	for locking := 0; locking < charset.End; locking++ {
+		if locking == charset.Spanish {
+			continue
+		}
+		for single := 0; single < charset.End; single++ {
+			for _, packed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%d/%d/packed=%t", locking, single, packed), func(t *testing.T) {
+					var repertoire strings.Builder
+					for _, table := range []charset.Decoder{charset.NewDecoder(locking), charset.NewExtDecoder(single)} {
+						for code := byte(0); code < 128; code++ {
+							if r, ok := table[code]; ok && code != 0x1b {
+								repertoire.WriteRune(r)
+							}
+						}
+					}
+					body := strings.Repeat(repertoire.String(), 2)
+					encoder := gsm7.NewEncoder(gsm7.WithCharset(locking), gsm7.WithExtCharset(single), gsm7.WithSubstitute('?'))
+					septets, report, err := encoder.EncodeReport([]byte("😀" + body + "😀"))
+					if err != nil || len(report) != 2 {
+						t.Fatalf("EncodeReport: %v, %v", report, err)
+					}
+					for i, want := range []gsm7.Substitution{
+						{Offset: 0, Rune: '😀', Substitute: '?'},
+						{Offset: len("😀") + len(body), Rune: '😀', Substitute: '?'},
+					} {
+						if report[i] != want {
+							t.Fatalf("substitution %d=%+v; want %+v", i, report[i], want)
+						}
+					}
+					decoder := gsm7.NewDecoder(gsm7.WithCharset(locking), gsm7.WithExtCharset(single))
+					text, err := decoder.Decode(septets)
+					if err != nil || string(text) != "?"+body+"?" {
+						t.Fatalf("substituted text=%q, %v", text, err)
+					}
+					plain := optionsCodec(t, data.GSM7Options{LockingShift: locking, SingleShift: single})
+					again, err := plain.Encode(string(text))
+					if err != nil || !bytes.Equal(again, septets) {
+						t.Fatalf("re-encoding changed septets: %x != %x, %v", again, septets, err)
+					}
+					codec := optionsCodec(t, data.GSM7Options{LockingShift: locking, SingleShift: single, Packed: packed})
+					parts, err := pdu.NewLongMessageWithEncoding(string(text), codec)
+					if err != nil || len(parts) < 2 {
+						t.Fatalf("NewLongMessageWithEncoding: %d parts, %v", len(parts), err)
+					}
+					var joined strings.Builder
+					for _, part := range parts {
+						decoded, err := part.GetMessage()
+						if err != nil || part.Encoding().DataCoding() != 0 {
+							t.Fatalf("GetMessage=%q, coding=%x, %v", decoded, part.Encoding().DataCoding(), err)
+						}
+						joined.WriteString(decoded)
+						want, err := plain.Encode(decoded)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if packed {
+							want, err = gsm7.Pack7BitCR(want, (7-part.UDH().UDHL()*8%7)%7)
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+						wire, err := part.GetMessageData()
+						if err != nil || !bytes.Equal(wire, want) {
+							t.Fatalf("part payload=%x; want %x, %v", wire, want, err)
+						}
+					}
+					if joined.String() != string(text) {
+						t.Fatalf("multipart text=%q; want %q", joined.String(), text)
+					}
+				})
+			}
 		}
 	}
 }

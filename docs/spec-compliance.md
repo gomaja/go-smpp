@@ -928,6 +928,20 @@ The extension fallback and the spaces for a repeated or final ESC follow
 TS 23.038 §§6.2.1–6.2.1.1; the report also lists the spaces go-sms substitutes
 for an unassigned septet and for a byte above `0x7f`, which is not a septet.
 
+`data.GSM7BIT`, `data.GSM7BITPACKED` and `data.NewGSM7` codecs remain strict on
+send: unrepresentable characters return `gsm7.ErrUnencodable`, and
+`data.FindEncoding` falls back to UCS2. For an explicit substitution policy,
+call `EncodeReport` on a go-sms `gsm7.Encoder` made with `gsm7.WithSubstitute`
+or `gsm7.WithSubstituteFunc` and the message's `gsm7.WithCharset` /
+`gsm7.WithExtCharset` tables. Substitutes must be representable in those
+tables; the report lists each substituted character's byte offset, original
+rune and substitute. On success, decode its unpacked septets with a
+`gsm7.Decoder` using the same tables and pass that text to
+`pdu.NewLongMessageWithEncoding` with a `data.NewGSM7` codec using the same
+locking/single-shift selectors and desired `Packed` setting. Re-encoding
+preserves the septets; the text path handles NLI headers, packing and splitting
+as described below.
+
 The public `data.GSM7` x/text factory, its streaming transformers,
 `ValidateGSM7String`, `ValidateGSM7Buffer`, `GetEscapeChars`, `IsEscapeChar`,
 `ErrInvalidCharacter`, `ErrInvalidByte` and the packed concrete type's

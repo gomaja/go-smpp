@@ -211,7 +211,7 @@ func serialize(request gosmpp.Request) ([]byte, error) {
 	buf := pdu.NewBuffer(make([]byte, 0, 64))
 	request.PDU.Marshal(buf)
 	if err := buf.Err(); err != nil {
-		return nil, err
+		return nil, &pdu.EncodeError{PDU: request.PDU, Err: err}
 	}
 	b := bytes.Buffer{}
 	e := gob.NewEncoder(&b)

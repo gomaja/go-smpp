@@ -169,6 +169,15 @@ func (c *base) unmarshalOptionalParam(optParam []byte) (err error) {
 	return
 }
 
+// encodeFailure identifies a marshalling failure as ErrEncode while keeping only
+// its cause's text: EncodeError and the bind request error add ErrEncode's text
+// once, so repeating it here would print "cannot encode PDU" twice.
+type encodeFailure struct{ err error }
+
+func (e *encodeFailure) Error() string        { return e.err.Error() }
+func (e *encodeFailure) Unwrap() error        { return e.err }
+func (e *encodeFailure) Is(target error) bool { return target == ErrEncode }
+
 // Marshal to buffer.
 func (c *base) marshal(b *ByteBuffer, bodyWriter func(*ByteBuffer)) {
 	bodyBuf := NewBuffer(nil)
@@ -186,7 +195,7 @@ func (c *base) marshal(b *ByteBuffer, bodyWriter func(*ByteBuffer)) {
 		bodyBuf.setError(fmt.Errorf("PDU length exceeds supported maximum %d", data.MAX_PDU_LEN))
 	}
 	if bodyBuf.Err() != nil {
-		b.setError(fmt.Errorf("%w: %w", ErrEncode, bodyBuf.Err()))
+		b.setError(&encodeFailure{err: bodyBuf.Err()})
 		return
 	}
 

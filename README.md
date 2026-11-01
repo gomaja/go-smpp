@@ -1074,6 +1074,7 @@ implementations as follows. The contracts above describe the resulting behavior.
 | Clearing optional parameters detaches the slice. | Use `ClearOptionalParameters`; earlier slices are independent of later appends. |
 | Marshal enforces representation, rather than every v3.4 maximum. | Call `pdu.Validate` for strict field maxima, including per-PDU address lengths. |
 | Encode failures are reported explicitly. | Check `ByteBuffer.Err()` and `errors.Is(err, pdu.ErrEncode)`; handle `*pdu.EncodeError`. |
+| The `ByteBuffer.Err()` message is now the cause alone. | Match with `errors.Is(err, pdu.ErrEncode)`, not the text. |
 | `ShortMessage.SetUDH`, `DestinationAddresses.Add`, `ShortMessage.Marshal` and `DestinationAddresses.Marshal` return errors. | Check each result; construction and marshaling can fail. |
 | `pdu.PDU` requires six additional methods. | Custom implementations must add `AppendOptionalParam`, `ClearOptionalParameters`, `GetOptionalParam`, `GetOptionalParameters`, `GetOptionalParams` and `SetCommandStatus`. |
 | `data.SMPP_V33` changes from `-0x33` to `0x33`; `OPT_PAR_MSG_WAIT` from `0x0002` to `0x0030`; `OPT_PAR_QOS_TIME_TO_LIVE_MIN` from `1` to `4`. | Use the named constants and update literal comparisons or lengths to the corrected values. |
